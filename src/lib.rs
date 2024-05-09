@@ -1,9 +1,12 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256, Sha512};
 
+pub use scrypt::Params as ScryptParams;
+
 pub enum PoWAlgorithm {
     Sha2_256,
     Sha2_512,
+    Scrypt(ScryptParams),
 }
 
 impl PoWAlgorithm {
@@ -29,10 +32,19 @@ impl PoWAlgorithm {
         final_hash.to_vec()
     }
 
+    pub fn calculate_scrypt(data: &[u8], nonce: usize, params: &ScryptParams) -> Vec<u8> {
+        let mut output = Vec::new();
+
+        scrypt::scrypt(data, &nonce.to_le_bytes(), params, &mut output);
+
+        output
+    }
+
     pub fn calculate(&self, data: &[u8], nonce: usize) -> Vec<u8> {
         match self {
             Self::Sha2_256 => Self::calculate_sha2_256(data, nonce),
             Self::Sha2_512 => Self::calculate_sha2_512(data, nonce),
+            Self::Scrypt(params) => Self::calculate_scrypt(data, nonce, params),
         }
     }
 }
