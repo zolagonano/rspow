@@ -1,8 +1,9 @@
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use sha2::{Digest, Sha256, Sha512};
 
 pub enum PoWAlgorithm {
     Sha2_256,
+    Sha2_512,
 }
 
 impl PoWAlgorithm {
@@ -17,9 +18,21 @@ impl PoWAlgorithm {
         final_hash.to_vec()
     }
 
+    pub fn calculate_sha2_512(data: &[u8], nonce: usize) -> Vec<u8> {
+        let mut hasher = Sha512::new();
+        hasher.update(data);
+
+        hasher.update(nonce.to_le_bytes());
+
+        let final_hash = hasher.finalize();
+
+        final_hash.to_vec()
+    }
+
     pub fn calculate(&self, data: &[u8], nonce: usize) -> Vec<u8> {
         match self {
             Self::Sha2_256 => Self::calculate_sha2_256(data, nonce),
+            Self::Sha2_512 => Self::calculate_sha2_512(data, nonce),
         }
     }
 }
