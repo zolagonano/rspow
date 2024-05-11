@@ -3,6 +3,7 @@ use sha2::{Digest, Sha256, Sha512};
 
 pub use scrypt::Params as ScryptParams;
 
+/// Enum defining different Proof of Work (PoW) algorithms.
 pub enum PoWAlgorithm {
     Sha2_256,
     Sha2_512,
@@ -10,6 +11,7 @@ pub enum PoWAlgorithm {
 }
 
 impl PoWAlgorithm {
+    /// Calculates SHA-256 hash with given data and nonce.
     pub fn calculate_sha2_256(data: &[u8], nonce: usize) -> Vec<u8> {
         let mut hasher = Sha256::new();
         hasher.update(data);
@@ -21,6 +23,7 @@ impl PoWAlgorithm {
         final_hash.to_vec()
     }
 
+    /// Calculates SHA-512 hash with given data and nonce.
     pub fn calculate_sha2_512(data: &[u8], nonce: usize) -> Vec<u8> {
         let mut hasher = Sha512::new();
         hasher.update(data);
@@ -32,6 +35,7 @@ impl PoWAlgorithm {
         final_hash.to_vec()
     }
 
+    /// Calculates Scrypt hash with given data and nonce.
     pub fn calculate_scrypt(data: &[u8], nonce: usize, params: &ScryptParams) -> Vec<u8> {
         let mut output = vec![0; 32];
 
@@ -40,6 +44,7 @@ impl PoWAlgorithm {
         output
     }
 
+    /// Calculates hash based on the selected algorithm.
     pub fn calculate(&self, data: &[u8], nonce: usize) -> Vec<u8> {
         match self {
             Self::Sha2_256 => Self::calculate_sha2_256(data, nonce),
@@ -49,6 +54,7 @@ impl PoWAlgorithm {
     }
 }
 
+/// Struct representing Proof of Work (PoW) with data, difficulty, and algorithm.
 pub struct PoW {
     data: Vec<u8>,
     difficulty: usize,
@@ -56,6 +62,7 @@ pub struct PoW {
 }
 
 impl PoW {
+    /// Creates a new instance of PoW with serialized data, difficulty, and algorithm.
     pub fn new(
         data: impl Serialize,
         difficulty: usize,
@@ -68,6 +75,7 @@ impl PoW {
         })
     }
 
+    /// Calculates PoW with the given target hash.
     pub fn calculate_pow(&self, target: &[u8]) -> (Vec<u8>, usize) {
         let mut nonce = 0;
 
@@ -81,6 +89,7 @@ impl PoW {
         }
     }
 
+    /// Verifies PoW with the given target hash and PoW result.
     pub fn verify_pow(&self, target: &[u8], pow_result: (Vec<u8>, usize)) -> bool {
         let (hash, nonce) = pow_result;
 
