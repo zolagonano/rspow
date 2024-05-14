@@ -1,6 +1,8 @@
+use argon2::Argon2;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256, Sha512};
 
+pub use argon2::Params as Argon2Params;
 pub use scrypt::Params as ScryptParams;
 
 /// Enum defining different Proof of Work (PoW) algorithms.
@@ -8,6 +10,7 @@ pub enum PoWAlgorithm {
     Sha2_256,
     Sha2_512,
     Scrypt(ScryptParams),
+    Argon2id(Argon2Params),
 }
 
 impl PoWAlgorithm {
@@ -35,11 +38,21 @@ impl PoWAlgorithm {
         final_hash.to_vec()
     }
 
-    /// Calculates Scrypt hash with given data and nonce.
+    /// Calculates Argon2id hash with given data and nonce.
     pub fn calculate_scrypt(data: &[u8], nonce: usize, params: &ScryptParams) -> Vec<u8> {
         let mut output = vec![0; 32];
 
         scrypt::scrypt(data, &nonce.to_le_bytes(), params, &mut output);
+
+        output
+    }
+
+    /// Calculates Scrypt hash with given data and nonce.
+    pub fn calculate_argon2id(data: &[u8], nonce: usize, params: &Argon2Params) -> Vec<u8> {
+        let mut output = vec![0; 32];
+        Argon2::default()
+            .hash_password_into(data, &nonce.to_le_bytes(), &mut output)
+            .unwrap();
 
         output
     }
@@ -50,6 +63,7 @@ impl PoWAlgorithm {
             Self::Sha2_256 => Self::calculate_sha2_256(data, nonce),
             Self::Sha2_512 => Self::calculate_sha2_512(data, nonce),
             Self::Scrypt(params) => Self::calculate_scrypt(data, nonce, params),
+            Self::Argon2id(params) => Self::calculate_argon2id(data, nonce, params),
         }
     }
 }
@@ -149,6 +163,20 @@ mod tests {
         assert_eq!(hash, expected_hash);
     }
 
+    #[test]
+    fn test_pow_algorithm_argon2id() {
+        let data = b"hello world";
+        let nonce = 12345;
+        let params = Argon2Params::new(16, 2, 2, None).unwrap();
+        let expected_hash = [
+            121, 222, 173, 128, 44, 161, 236, 9, 56, 163, 21, 161, 111, 241, 182, 60, 144, 77, 206,
+            200, 220, 147, 149, 223, 6, 115, 230, 200, 155, 53, 29, 42,
+        ];
+
+        let hash = PoWAlgorithm::calculate_argon2id(data, nonce, &params);
+
+        assert_eq!(hash, expected_hash);
+    }
     #[test]
     fn test_pow_calculate_pow() {
         let data = "hello world";
