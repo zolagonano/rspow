@@ -1,4 +1,5 @@
 use argon2::Argon2;
+use ripemd::Ripemd320;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256, Sha512};
 
@@ -9,6 +10,7 @@ pub use scrypt::Params as ScryptParams;
 pub enum PoWAlgorithm {
     Sha2_256,
     Sha2_512,
+    RIPEMD_320,
     Scrypt(ScryptParams),
     Argon2id(Argon2Params),
 }
@@ -29,6 +31,18 @@ impl PoWAlgorithm {
     /// Calculates SHA-512 hash with given data and nonce.
     pub fn calculate_sha2_512(data: &[u8], nonce: usize) -> Vec<u8> {
         let mut hasher = Sha512::new();
+        hasher.update(data);
+
+        hasher.update(nonce.to_le_bytes());
+
+        let final_hash = hasher.finalize();
+
+        final_hash.to_vec()
+    }
+
+    /// Calculates RIPEMD320 hash with given data and nonce.
+    pub fn calculate_ripemd_320(data: &[u8], nonce: usize) -> Vec<u8> {
+        let mut hasher = Ripemd320::new();
         hasher.update(data);
 
         hasher.update(nonce.to_le_bytes());
@@ -62,6 +76,7 @@ impl PoWAlgorithm {
         match self {
             Self::Sha2_256 => Self::calculate_sha2_256(data, nonce),
             Self::Sha2_512 => Self::calculate_sha2_512(data, nonce),
+            Self::RIPEMD_320 => Self::calculate_sha2_512(data, nonce),
             Self::Scrypt(params) => Self::calculate_scrypt(data, nonce, params),
             Self::Argon2id(params) => Self::calculate_argon2id(data, nonce, params),
         }
@@ -144,6 +159,21 @@ mod tests {
             23, 106, 152, 58, 110, 134, 144,
         ];
         let hash = PoWAlgorithm::calculate_sha2_512(data, nonce);
+
+        assert_eq!(hash, expected_hash);
+    }
+
+    #[test]
+    fn test_pow_algorithm_ripemd_320() {
+        let data = b"hello world";
+        let nonce = 12345;
+        let expected_hash = [
+            136, 243, 131, 91, 134, 239, 75, 101, 140, 4, 66, 6, 143, 87, 176, 118, 94, 92, 142,
+            211, 74, 63, 182, 20, 119, 221, 125, 126, 20, 227, 45, 10, 34, 110, 210, 133, 131, 44,
+            45, 23,
+        ];
+
+        let hash = PoWAlgorithm::calculate_ripemd_320(data, nonce);
 
         assert_eq!(hash, expected_hash);
     }
