@@ -104,6 +104,12 @@ impl PoW {
         })
     }
 
+    /// Calculates the target of zeros based on the difficulty
+    pub fn calculate_target(&self) -> Vec<u8> {
+        // 0x30 is code for ascii character '0'
+        vec![0x30u8; self.difficulty]
+    }
+
     /// Calculates PoW with the given target hash.
     pub fn calculate_pow(&self, target: &[u8]) -> (Vec<u8>, usize) {
         let mut nonce = 0;
