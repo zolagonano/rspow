@@ -1,6 +1,14 @@
 [package]
 name = "rspow"
 version = "0.1.0"
+authors = ["Zola Gonano <zolagonano@protonmail.com>"]
+description = "A multi-algorithm proof-of-work library in rust"
+homepage = "https://github.com/zolagonano/rspow.git"
+repository = "https://github.com/zolagonano/rspow.git"
+keywords = ["pow"]
+categories = ["command-line-utilities"]
+license = "MIT OR Apache-2.0"
+readme = "README.md"
 edition = "2021"
 
 [dependencies]
