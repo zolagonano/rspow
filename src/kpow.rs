@@ -1,4 +1,5 @@
 //! KPoW: k puzzles with an alpha-sized worker pool and a central scheduler.
+#![allow(unexpected_cfgs)]
 //!
 //! Design goals
 //! - Deterministic interface: caller sets bits, Argon2 params, worker count, seed, payload.
@@ -11,6 +12,19 @@
 //! - Native (non-wasm): std::thread worker pool + mpsc channels.
 //! - Wasm: if target supports atomics (threaded wasm), use the same model; otherwise fall back to
 //!   single-thread execution transparently.
+
+// Enforce threaded WASM by default. To temporarily allow single-thread fallback when
+// building for wasm32 without atomics, compile with `--cfg kpow_allow_single_thread`.
+#[cfg(all(
+    target_arch = "wasm32",
+    not(target_feature = "atomics"),
+    not(kpow_allow_single_thread)
+))]
+compile_error!(
+    "KPoW requires threaded WebAssembly (wasm32 with +atomics). \
+     Enable target features +atomics,+bulk-memory,+mutable-globals and serve with COOP/COEP. \
+     For temporary single-thread fallback during experiments, build with --cfg kpow_allow_single_thread."
+);
 
 use crate::{meets_leading_zero_bits, Argon2Params, PoWAlgorithm};
 use sha2::{Digest, Sha256};
