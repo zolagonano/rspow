@@ -1,12 +1,13 @@
-use argon2::Argon2;
+use argon2::{Argon2, Algorithm, Version};
 use ripemd::Ripemd320;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use sha2::{Digest, Sha256, Sha512};
 
 pub use argon2::Params as Argon2Params;
 pub use scrypt::Params as ScryptParams;
 
 /// Enum defining different Proof of Work (PoW) algorithms.
+#[allow(non_camel_case_types)]
 pub enum PoWAlgorithm {
     Sha2_256,
     Sha2_512,
@@ -56,7 +57,7 @@ impl PoWAlgorithm {
     pub fn calculate_scrypt(data: &[u8], nonce: usize, params: &ScryptParams) -> Vec<u8> {
         let mut output = vec![0; 32];
 
-        scrypt::scrypt(data, &nonce.to_le_bytes(), params, &mut output);
+        let _ = scrypt::scrypt(data, &nonce.to_le_bytes(), params, &mut output);
 
         output
     }
@@ -64,8 +65,8 @@ impl PoWAlgorithm {
     /// Calculates Scrypt hash with given data and nonce.
     pub fn calculate_argon2id(data: &[u8], nonce: usize, params: &Argon2Params) -> Vec<u8> {
         let mut output = vec![0; 32];
-        Argon2::default()
-            .hash_password_into(data, &nonce.to_le_bytes(), &mut output)
+        let a2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params.to_owned());
+        a2.hash_password_into(data, &nonce.to_le_bytes(), &mut output)
             .unwrap();
 
         output
@@ -76,7 +77,7 @@ impl PoWAlgorithm {
         match self {
             Self::Sha2_256 => Self::calculate_sha2_256(data, nonce),
             Self::Sha2_512 => Self::calculate_sha2_512(data, nonce),
-            Self::RIPEMD_320 => Self::calculate_sha2_512(data, nonce),
+            Self::RIPEMD_320 => Self::calculate_ripemd_320(data, nonce),
             Self::Scrypt(params) => Self::calculate_scrypt(data, nonce, params),
             Self::Argon2id(params) => Self::calculate_argon2id(data, nonce, params),
         }
@@ -185,6 +186,15 @@ mod tests {
     }
 
     #[test]
+    fn test_pow_algorithm_dispatch_ripemd_320() {
+        let data = b"hello world";
+        let nonce = 12345;
+        let via_dispatch = PoWAlgorithm::RIPEMD_320.calculate(data, nonce);
+        let direct = PoWAlgorithm::calculate_ripemd_320(data, nonce);
+        assert_eq!(via_dispatch, direct);
+    }
+
+    #[test]
     fn test_pow_algorithm_scrypt() {
         let data = b"hello world";
         let nonce = 12345;
@@ -205,8 +215,8 @@ mod tests {
         let nonce = 12345;
         let params = Argon2Params::new(16, 2, 2, None).unwrap();
         let expected_hash = [
-            121, 222, 173, 128, 44, 161, 236, 9, 56, 163, 21, 161, 111, 241, 182, 60, 144, 77, 206,
-            200, 220, 147, 149, 223, 6, 115, 230, 200, 155, 53, 29, 42,
+            243, 150, 29, 238, 126, 244, 47, 122, 69, 22, 69, 20, 102, 5, 218, 124,
+            251, 140, 204, 53, 133, 2, 147, 207, 66, 17, 241, 177, 20, 249, 251, 155,
         ];
 
         let hash = PoWAlgorithm::calculate_argon2id(data, nonce, &params);
