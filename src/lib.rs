@@ -57,6 +57,21 @@ pub mod bench {
         pub p_cost: u32,
     }
 
+    const Z95: f64 = 1.959963984540054;
+    const Z99: f64 = 2.5758293035489004;
+
+    fn confidence_bounds(mean: f64, stderr: f64) -> (f64, f64, f64, f64) {
+        if stderr <= f64::EPSILON {
+            return (mean, mean, mean, mean);
+        }
+
+        let ci95_low = mean - Z95 * stderr;
+        let ci95_high = mean + Z95 * stderr;
+        let ci99_low = mean - Z99 * stderr;
+        let ci99_high = mean + Z99 * stderr;
+        (ci95_low, ci95_high, ci99_low, ci99_high)
+    }
+
     /// Construct Argon2 parameters from memory cost (KiB), time cost, and parallelism.
     #[allow(dead_code)]
     pub fn argon2_params_kib(
@@ -75,10 +90,20 @@ pub mod bench {
         pub std_time_ms: f64,
         pub min_time_ms: u128,
         pub max_time_ms: u128,
+        pub stderr_time_ms: f64,
+        pub ci95_low_time_ms: f64,
+        pub ci95_high_time_ms: f64,
+        pub ci99_low_time_ms: f64,
+        pub ci99_high_time_ms: f64,
         pub mean_tries: f64,
         pub std_tries: f64,
         pub min_tries: u64,
         pub max_tries: u64,
+        pub stderr_tries: f64,
+        pub ci95_low_tries: f64,
+        pub ci95_high_tries: f64,
+        pub ci99_low_tries: f64,
+        pub ci99_high_tries: f64,
     }
 
     /// Compute summary statistics across multiple outcomes.
@@ -113,29 +138,58 @@ pub mod bench {
         }
 
         let mean_time_ms = sum_time / count;
-        let variance_time = (sum_time_sq / count) - (mean_time_ms * mean_time_ms);
-        let std_time_ms = variance_time.max(0.0).sqrt();
+        let n = outcomes.len() as f64;
+        let std_time_ms = if outcomes.len() > 1 {
+            let variance_time = (sum_time_sq - (sum_time * sum_time) / n) / (n - 1.0);
+            variance_time.max(0.0).sqrt()
+        } else {
+            0.0
+        };
+
+        let stderr_time_ms = if n > 0.0 { std_time_ms / n.sqrt() } else { 0.0 };
+
+        let (ci95_low_time_ms, ci95_high_time_ms, ci99_low_time_ms, ci99_high_time_ms) =
+            confidence_bounds(mean_time_ms, stderr_time_ms);
 
         let mean_tries = sum_tries / count;
-        let variance_tries = (sum_tries_sq / count) - (mean_tries * mean_tries);
-        let std_tries = variance_tries.max(0.0).sqrt();
+        let std_tries = if outcomes.len() > 1 {
+            let variance_tries = (sum_tries_sq - (sum_tries * sum_tries) / n) / (n - 1.0);
+            variance_tries.max(0.0).sqrt()
+        } else {
+            0.0
+        };
+
+        let stderr_tries = if n > 0.0 { std_tries / n.sqrt() } else { 0.0 };
+
+        let (ci95_low_tries, ci95_high_tries, ci99_low_tries, ci99_high_tries) =
+            confidence_bounds(mean_tries, stderr_tries);
 
         Ok(BenchSummary {
             mean_time_ms,
             std_time_ms,
             min_time_ms: min_time,
             max_time_ms: max_time,
+            stderr_time_ms,
+            ci95_low_time_ms,
+            ci95_high_time_ms,
+            ci99_low_time_ms,
+            ci99_high_time_ms,
             mean_tries,
             std_tries,
             min_tries,
             max_tries,
+            stderr_tries,
+            ci95_low_tries,
+            ci95_high_tries,
+            ci99_low_tries,
+            ci99_high_tries,
         })
     }
 
     /// CSV header shared by run rows and summary rows.
     #[allow(dead_code)]
     pub const fn csv_header() -> &'static str {
-        "kind,algo,mode,m_kib,t_cost,p_cost,data_len,bits,run_idx,time_ms,tries,nonce,hash_hex,mean_time_ms,std_time_ms,min_time_ms,max_time_ms,mean_tries,std_tries,min_tries,max_tries"
+        "kind,algo,mode,m_kib,t_cost,p_cost,data_len,bits,run_idx,time_ms,tries,nonce,hash_hex,mean_time_ms,std_time_ms,stderr_time_ms,ci95_low_time_ms,ci95_high_time_ms,ci99_low_time_ms,ci99_high_time_ms,min_time_ms,max_time_ms,mean_tries,std_tries,stderr_tries,ci95_low_tries,ci95_high_tries,ci99_low_tries,ci99_high_tries,min_tries,max_tries"
     }
 
     /// Format a single run outcome as a CSV row.
@@ -169,13 +223,23 @@ pub mod bench {
         mode: &str,
     ) -> String {
         format!(
-            "summary,{algo},{mode},{m_kib},{t_cost},{p_cost},{data_len},{bits},,,,,{:.6},{:.6},{},{},{:.6},{:.6},{},{}",
+            "summary,{algo},{mode},{m_kib},{t_cost},{p_cost},{data_len},{bits},,,,,{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{},{},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{},{}",
             summary.mean_time_ms,
             summary.std_time_ms,
+            summary.stderr_time_ms,
+            summary.ci95_low_time_ms,
+            summary.ci95_high_time_ms,
+            summary.ci99_low_time_ms,
+            summary.ci99_high_time_ms,
             summary.min_time_ms,
             summary.max_time_ms,
             summary.mean_tries,
             summary.std_tries,
+            summary.stderr_tries,
+            summary.ci95_low_tries,
+            summary.ci95_high_tries,
+            summary.ci99_low_tries,
+            summary.ci99_high_tries,
             summary.min_tries,
             summary.max_tries
         )
@@ -259,6 +323,45 @@ pub mod bench {
             assert_eq!(summary.max_tries, 4);
             assert!((summary.mean_time_ms - 15.0).abs() < f64::EPSILON);
             assert!((summary.mean_tries - 3.0).abs() < f64::EPSILON);
+            assert!((summary.std_time_ms - 7.0710678118654755).abs() < 1e-9);
+            assert!((summary.stderr_time_ms - 5.0).abs() < 1e-9);
+            assert!((summary.ci95_low_time_ms - 5.200180077299731).abs() < 1e-6);
+            assert!((summary.ci95_high_time_ms - 24.79981992270027).abs() < 1e-6);
+            assert!((summary.ci99_low_time_ms - 2.120853482255498).abs() < 1e-6);
+            assert!((summary.ci99_high_time_ms - 27.879146517744502).abs() < 1e-6);
+            assert!((summary.std_tries - 1.4142135623730951).abs() < 1e-9);
+            assert!((summary.stderr_tries - 1.0).abs() < 1e-9);
+            assert!((summary.ci95_low_tries - 1.040036015459946).abs() < 1e-6);
+            assert!((summary.ci95_high_tries - 4.959963984540054).abs() < 1e-6);
+            assert!((summary.ci99_low_tries - 0.4241706964510996).abs() < 1e-6);
+            assert!((summary.ci99_high_tries - 5.5758293035489).abs() < 1e-6);
+        }
+
+        #[test]
+        fn summarize_single_sample() {
+            let outcomes = [BenchOutcome {
+                bits: 1,
+                data_len: 4,
+                time_ms: 42,
+                tries: 7,
+                nonce: 10,
+                hash_hex: String::new(),
+                m_kib: 8,
+                t_cost: 1,
+                p_cost: 1,
+            }];
+
+            let summary = summarize(&outcomes).expect("summary");
+            assert_eq!(summary.mean_time_ms, 42.0);
+            assert_eq!(summary.std_time_ms, 0.0);
+            assert_eq!(summary.stderr_time_ms, 0.0);
+            assert_eq!(summary.ci95_low_time_ms, 42.0);
+            assert_eq!(summary.ci95_high_time_ms, 42.0);
+            assert_eq!(summary.ci99_low_time_ms, 42.0);
+            assert_eq!(summary.ci99_high_time_ms, 42.0);
+            assert_eq!(summary.mean_tries, 7.0);
+            assert_eq!(summary.std_tries, 0.0);
+            assert_eq!(summary.stderr_tries, 0.0);
         }
     }
 }

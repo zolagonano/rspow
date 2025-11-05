@@ -56,8 +56,7 @@ fn run() -> Result<(), String> {
             };
 
             let outcome = bench_argon2_leading_bits_once(&config.data, bits, &params, start_nonce)?;
-            writeln!(stdout, "{}", csv_row_run(&outcome, algo, mode, run_idx))
-                .map_err(io_err)?;
+            writeln!(stdout, "{}", csv_row_run(&outcome, algo, mode, run_idx)).map_err(io_err)?;
             stdout.flush().map_err(io_err)?;
             outcomes.push(outcome);
         }
@@ -181,11 +180,16 @@ fn parse_args() -> Result<Config, String> {
     })
 }
 
-fn parse_next<T: FromStr>(args: &mut impl Iterator<Item = String>, flag: &str) -> Result<T, String> {
+fn parse_next<T: FromStr>(
+    args: &mut impl Iterator<Item = String>,
+    flag: &str,
+) -> Result<T, String> {
     let value = args
         .next()
         .ok_or_else(|| format!("{flag} requires a value"))?;
-    value.parse::<T>().map_err(|_| format!("invalid value for {flag}"))
+    value
+        .parse::<T>()
+        .map_err(|_| format!("invalid value for {flag}"))
 }
 
 fn print_help() {
