@@ -36,6 +36,9 @@ use sha2::{Digest, Sha256, Sha512};
 pub use argon2::Params as Argon2Params;
 pub use scrypt::Params as ScryptParams;
 
+// Expose KPoW (k puzzles with worker pool) utilities.
+pub mod kpow;
+
 pub mod bench {
     use super::{meets_leading_zero_bits, Argon2Params, PoWAlgorithm};
     use hex::encode as hex_encode;
