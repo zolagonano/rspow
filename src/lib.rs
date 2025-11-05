@@ -84,6 +84,35 @@ impl PoWAlgorithm {
     }
 }
 
+pub(crate) fn meets_leading_zero_bits(hash: &[u8], bits: u32) -> bool {
+    if bits == 0 {
+        return true;
+    }
+    let total_bits = (hash.len() as u32) * 8;
+    if bits > total_bits {
+        return false;
+    }
+
+    let full_bytes = (bits / 8) as usize;
+    let rem_bits = (bits % 8) as u8;
+
+    for b in hash.iter().take(full_bytes) {
+        if *b != 0 {
+            return false;
+        }
+    }
+
+    if rem_bits > 0 {
+        let b = hash[full_bytes];
+        let mask = 0xFFu8 << (8 - rem_bits);
+        if (b & mask) != 0 {
+            return false;
+        }
+    }
+
+    true
+}
+
 /// Struct representing Proof of Work (PoW) with data, difficulty, and algorithm.
 pub struct PoW {
     data: Vec<u8>,
@@ -236,5 +265,42 @@ mod tests {
         assert!(hash.starts_with(&target[..difficulty]));
 
         assert!(pow.verify_pow(&target, (hash.clone(), nonce)));
+    }
+
+    // -------- 按比特前缀判定工具函数测试 --------
+    #[test]
+    fn test_meets_leading_zero_bits_basic() {
+        // 0x00 0x00 0xFF -> 前 16 比特均为 0，第 17 比特为 1
+        let h = [0x00u8, 0x00u8, 0xFFu8];
+        assert!(meets_leading_zero_bits(&h, 0));
+        assert!(meets_leading_zero_bits(&h, 1));
+        assert!(meets_leading_zero_bits(&h, 7));
+        assert!(meets_leading_zero_bits(&h, 8));
+        assert!(meets_leading_zero_bits(&h, 9));
+        assert!(meets_leading_zero_bits(&h, 15));
+        assert!(meets_leading_zero_bits(&h, 16));
+        assert!(!meets_leading_zero_bits(&h, 17));
+    }
+
+    #[test]
+    fn test_meets_leading_zero_bits_edges() {
+        // 最高位为 1：0x80 -> 1000_0000
+        let h1 = [0x80u8, 0x00u8];
+        assert!(!meets_leading_zero_bits(&h1, 1));
+
+        // 0x7F -> 0111_1111，前导零仅 1 位
+        let h2 = [0x7Fu8, 0xFFu8];
+        assert!(meets_leading_zero_bits(&h2, 1));
+        assert!(!meets_leading_zero_bits(&h2, 2));
+
+        // 0x00 0x80：前 8 位为 0，第 9 位为 1
+        let h3 = [0x00u8, 0x80u8];
+        assert!(meets_leading_zero_bits(&h3, 8));
+        assert!(!meets_leading_zero_bits(&h3, 9));
+
+        // 长度不足：bits 超出可用位数
+        let h4 = [0x00u8, 0x00u8, 0x00u8];
+        assert!(meets_leading_zero_bits(&h4, 24));
+        assert!(!meets_leading_zero_bits(&h4, 25));
     }
 }
