@@ -1,3 +1,33 @@
+//! RSPOW: simple multi-algorithm proof-of-work utilities.
+//!
+//! Supported algorithms:
+//! - SHA-256, SHA-512, RIPEMD-320
+//! - Scrypt, Argon2id (with custom `Params`)
+//!
+//! Difficulty modes:
+//! - `AsciiZeroPrefix` (default): hash must start with `difficulty` bytes of ASCII '0' (0x30).
+//! - `LeadingZeroBits`: hash must have at least `difficulty` leading zero bits (big-endian within bytes).
+//!
+//! Quick examples:
+//!
+//! ```rust
+//! use rspow::{PoW, PoWAlgorithm};
+//!
+//! let data = "hello";
+//! let algorithm = PoWAlgorithm::Sha2_256;
+//! let pow = PoW::new(data, 2, algorithm).unwrap();
+//! let target = pow.calculate_target();
+//! let (_hash, _nonce) = pow.calculate_pow(&target);
+//! ```
+//!
+//! ```rust
+//! use rspow::{PoW, PoWAlgorithm, DifficultyMode};
+//!
+//! let data = "hello";
+//! let pow = PoW::with_mode(data, 10, PoWAlgorithm::Sha2_256, DifficultyMode::LeadingZeroBits).unwrap();
+//! let (_hash, _nonce) = pow.calculate_pow(&[]); // target ignored in bits mode
+//! ```
+//!
 use argon2::{Argon2, Algorithm, Version};
 use ripemd::Ripemd320;
 use serde::Serialize;
@@ -90,7 +120,7 @@ impl PoWAlgorithm {
 /// (i.e., the most significant bit is checked first).
 /// - When `bits == 0`, return `true`.
 /// - When `bits > hash.len() * 8`, return `false`.
-pub(crate) fn meets_leading_zero_bits(hash: &[u8], bits: u32) -> bool {
+pub fn meets_leading_zero_bits(hash: &[u8], bits: u32) -> bool {
     if bits == 0 {
         return true;
     }
