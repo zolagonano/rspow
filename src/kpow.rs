@@ -88,7 +88,7 @@ impl KPow {
         for i in 0..k {
             let mut hasher = Sha256::new();
             hasher.update(b"KPOW");
-            hasher.update(&self.seed);
+            hasher.update(self.seed);
             hasher.update((i as u64).to_le_bytes());
             hasher.update(&self.payload);
             let digest = hasher.finalize();
@@ -103,8 +103,8 @@ impl KPow {
     pub fn verify_proof(&self, proof: &KProof) -> bool {
         let puzzles = self.derive_puzzles(proof.index + 1);
         let data = puzzles[proof.index];
-        let hash = PoWAlgorithm::Argon2id(self.params.clone())
-            .calculate(&data, proof.nonce as usize);
+        let hash =
+            PoWAlgorithm::Argon2id(self.params.clone()).calculate(&data, proof.nonce as usize);
         let mut h32 = [0u8; 32];
         h32.copy_from_slice(&hash);
         h32 == proof.hash && meets_leading_zero_bits(&hash, self.bits)
@@ -141,25 +141,30 @@ impl KPow {
             all(target_arch = "wasm32", target_feature = "atomics"),
         ))]
         {
-            return self.solve_parallel(k, with_stats);
+            self.solve_parallel(k, with_stats)
         }
         #[cfg(not(any(
             not(target_arch = "wasm32"),
             all(target_arch = "wasm32", target_feature = "atomics"),
         )))]
         {
-            return self.solve_single_thread(k, with_stats);
+            self.solve_single_thread(k, with_stats)
         }
     }
 
     /// Single-thread baseline implementation (used on non-threaded wasm targets).
+    #[allow(dead_code)]
     fn solve_single_thread(
         &self,
         k: usize,
         with_stats: bool,
     ) -> Result<(Vec<KProof>, Option<KPowResult>), String> {
         let puzzles = self.derive_puzzles(k);
-        let start = if with_stats { Some(Instant::now()) } else { None };
+        let start = if with_stats {
+            Some(Instant::now())
+        } else {
+            None
+        };
         let mut total_tries: u64 = 0;
         let mut successes = 0usize;
         let mut proofs = Vec::with_capacity(k);
@@ -167,8 +172,8 @@ impl KPow {
         for (idx, data) in puzzles.into_iter().enumerate() {
             let mut nonce: u64 = 0;
             loop {
-                let hash = PoWAlgorithm::Argon2id(self.params.clone())
-                    .calculate(&data, nonce as usize);
+                let hash =
+                    PoWAlgorithm::Argon2id(self.params.clone()).calculate(&data, nonce as usize);
                 if with_stats {
                     total_tries += 1;
                 }
@@ -176,10 +181,16 @@ impl KPow {
                     successes += 1;
                     let mut h32 = [0u8; 32];
                     h32.copy_from_slice(&hash);
-                    proofs.push(KProof { index: idx, nonce, hash: h32 });
+                    proofs.push(KProof {
+                        index: idx,
+                        nonce,
+                        hash: h32,
+                    });
                     break;
                 }
-                nonce = nonce.checked_add(1).ok_or_else(|| "nonce overflow".to_owned())?;
+                nonce = nonce
+                    .checked_add(1)
+                    .ok_or_else(|| "nonce overflow".to_owned())?;
             }
         }
         let stats = if with_stats {
@@ -206,7 +217,7 @@ impl KPow {
     ) -> Result<(Vec<KProof>, Option<KPowResult>), String> {
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::mpsc;
-        use std::sync::Arc;
+        use std::sync::{Arc, Mutex};
         use std::thread;
 
         if self.workers == 0 {
@@ -232,6 +243,7 @@ impl KPow {
         }
 
         let (task_tx, task_rx) = mpsc::channel::<Task>();
+        let task_rx = Arc::new(Mutex::new(task_rx));
         let (res_tx, res_rx) = mpsc::channel::<Res>();
         let stop = Arc::new(AtomicBool::new(false));
 
@@ -243,41 +255,72 @@ impl KPow {
             let puzzles = puzzles.clone();
             let params = params.clone();
             let stop = stop.clone();
-            let j = thread::spawn(move || {
-                while let Ok(Task { idx, nonce }) = rx.recv() {
-                    if stop.load(Ordering::Relaxed) {
-                        break;
-                    }
-                    let data = puzzles[idx];
-                    let hash = PoWAlgorithm::Argon2id(params.clone())
-                        .calculate(&data, nonce as usize);
-                    let ok = meets_leading_zero_bits(&hash, bits);
-                    let mut h32 = [0u8; 32];
-                    h32.copy_from_slice(&hash);
-                    let _ = tx.send(Res { idx, nonce, ok, hash: h32 });
+            let j = thread::spawn(move || loop {
+                let msg = {
+                    let lock = rx.lock().unwrap();
+                    lock.recv()
+                };
+                let Task { idx, nonce } = match msg {
+                    Ok(t) => t,
+                    Err(_) => break,
+                };
+                if stop.load(Ordering::Relaxed) {
+                    break;
                 }
+                let data = puzzles[idx];
+                let hash = PoWAlgorithm::Argon2id(params.clone()).calculate(&data, nonce as usize);
+                let ok = meets_leading_zero_bits(&hash, bits);
+                let mut h32 = [0u8; 32];
+                h32.copy_from_slice(&hash);
+                let _ = tx.send(Res {
+                    idx,
+                    nonce,
+                    ok,
+                    hash: h32,
+                });
             });
             joins.push(j);
         }
         drop(res_tx); // receiver side stays; workers hold their own tx clone
 
         // Scheduler state
-        struct State { next_nonce: u64, done: bool }
-        let mut states: Vec<State> = (0..k).map(|_| State { next_nonce: 0, done: false }).collect();
+        struct State {
+            next_nonce: u64,
+            done: bool,
+        }
+        let mut states: Vec<State> = (0..k)
+            .map(|_| State {
+                next_nonce: 0,
+                done: false,
+            })
+            .collect();
         let mut proofs_by_idx: Vec<Option<KProof>> = (0..k).map(|_| None).collect();
 
         // Prime the queue: one task per puzzle
         for i in 0..k {
-            task_tx.send(Task { idx: i, nonce: 0 }).map_err(|e| e.to_string())?;
+            task_tx
+                .send(Task { idx: i, nonce: 0 })
+                .map_err(|e| e.to_string())?;
         }
 
-        let start = if with_stats { Some(Instant::now()) } else { None };
+        let start = if with_stats {
+            Some(Instant::now())
+        } else {
+            None
+        };
         let mut total_tries: u64 = 0;
         let mut successes = 0usize;
 
         while successes < k {
-            let Res { idx, nonce, ok, hash } = res_rx.recv().map_err(|e| e.to_string())?;
-            if with_stats { total_tries += 1; }
+            let Res {
+                idx,
+                nonce,
+                ok,
+                hash,
+            } = res_rx.recv().map_err(|e| e.to_string())?;
+            if with_stats {
+                total_tries += 1;
+            }
 
             let st = &mut states[idx];
             if st.done {
@@ -287,26 +330,36 @@ impl KPow {
             if ok {
                 st.done = true;
                 successes += 1;
-                proofs_by_idx[idx] = Some(KProof { index: idx, nonce, hash });
+                proofs_by_idx[idx] = Some(KProof {
+                    index: idx,
+                    nonce,
+                    hash,
+                });
                 if successes == k {
                     stop.store(true, Ordering::Relaxed);
                     break;
                 }
             } else {
-                st.next_nonce = st.next_nonce.checked_add(1).ok_or_else(|| "nonce overflow".to_owned())?;
-                task_tx.send(Task { idx, nonce: st.next_nonce }).map_err(|e| e.to_string())?;
+                st.next_nonce = st
+                    .next_nonce
+                    .checked_add(1)
+                    .ok_or_else(|| "nonce overflow".to_owned())?;
+                task_tx
+                    .send(Task {
+                        idx,
+                        nonce: st.next_nonce,
+                    })
+                    .map_err(|e| e.to_string())?;
             }
         }
 
         // Close task channel to let workers exit once they finish current task
         drop(task_tx);
-        for j in joins { let _ = j.join(); }
+        for j in joins {
+            let _ = j.join();
+        }
 
-        let proofs: Vec<KProof> = proofs_by_idx
-            .into_iter()
-            .enumerate()
-            .filter_map(|(_i, p)| p)
-            .collect();
+        let proofs: Vec<KProof> = proofs_by_idx.into_iter().flatten().collect();
         let stats = if with_stats {
             Some(KPowResult {
                 total_time_ms: start.unwrap().elapsed().as_millis(),
@@ -317,5 +370,22 @@ impl KPow {
             None
         };
         Ok((proofs, stats))
+    }
+}
+
+// --- Wasm threading bootstrap (optional, wasm-only) ---
+#[cfg(target_arch = "wasm32")]
+mod wasm_threads_init {
+    use super::*;
+    use wasm_bindgen::prelude::*;
+
+    /// Initialize the wasm thread pool for std::thread on wasm (Web Workers under the hood).
+    /// Must be called from JS before invoking parallel KPoW on the main thread.
+    /// If not called (or platform lacks atomics), KPoW falls back to single-thread.
+    #[wasm_bindgen]
+    pub async fn init_wasm_threads(workers: usize) -> Result<(), JsValue> {
+        wasm_bindgen_rayon::init_thread_pool(workers)
+            .await
+            .map_err(|e| JsValue::from_str(&format!("init_thread_pool failed: {e}")))
     }
 }

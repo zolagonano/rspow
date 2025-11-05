@@ -13,7 +13,10 @@ fn main() -> Result<(), String> {
     let payload: Vec<u8> = b"demo-payload".to_vec();
 
     // Construct KPoW and solve for k proofs
-    let k: usize = std::env::var("KPOW_K").ok().and_then(|s| s.parse().ok()).unwrap_or(8);
+    let k: usize = std::env::var("KPOW_K")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(8);
     let kpow = KPow::new(bits, params, workers, seed, payload);
 
     // Benchmark path: get proofs and overall stats
@@ -26,8 +29,9 @@ fn main() -> Result<(), String> {
     // Optionally, verify all proofs locally
     let all_ok = proofs.iter().all(|p| kpow.verify_proof(p));
     println!("verify_all={} ({} proofs)", all_ok, proofs.len());
-    if !all_ok { return Err("verification failed".to_owned()); }
+    if !all_ok {
+        return Err("verification failed".to_owned());
+    }
 
     Ok(())
 }
-

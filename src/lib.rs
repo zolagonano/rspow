@@ -215,6 +215,7 @@ pub mod bench {
 
     /// Format summary statistics as a CSV row.
     #[allow(dead_code)]
+    #[allow(clippy::too_many_arguments)]
     pub fn csv_row_summary(
         bits: u32,
         data_len: usize,
