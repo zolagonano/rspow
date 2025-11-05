@@ -84,6 +84,12 @@ impl PoWAlgorithm {
     }
 }
 
+/// Utility: check whether `hash` has at least `bits` leading zero bits.
+///
+/// Convention: count leading zero bits in big-endian bit order within each byte
+/// (i.e., the most significant bit is checked first).
+/// - When `bits == 0`, return `true`.
+/// - When `bits > hash.len() * 8`, return `false`.
 pub(crate) fn meets_leading_zero_bits(hash: &[u8], bits: u32) -> bool {
     if bits == 0 {
         return true;
@@ -96,12 +102,14 @@ pub(crate) fn meets_leading_zero_bits(hash: &[u8], bits: u32) -> bool {
     let full_bytes = (bits / 8) as usize;
     let rem_bits = (bits % 8) as u8;
 
+    // Full-zero check for bytes fully covered by `bits`.
     for b in hash.iter().take(full_bytes) {
         if *b != 0 {
             return false;
         }
     }
 
+    // Remaining high bits in the next byte must be zero as well.
     if rem_bits > 0 {
         let b = hash[full_bytes];
         let mask = 0xFFu8 << (8 - rem_bits);
@@ -113,11 +121,21 @@ pub(crate) fn meets_leading_zero_bits(hash: &[u8], bits: u32) -> bool {
     true
 }
 
+/// Difficulty modes supported by PoW.
+#[derive(Clone, Copy)]
+pub enum DifficultyMode {
+    /// Legacy mode: prefix must be ASCII '0' bytes (0x30), one per difficulty level.
+    AsciiZeroPrefix,
+    /// New mode: require a given number of leading zero bits.
+    LeadingZeroBits,
+}
+
 /// Struct representing Proof of Work (PoW) with data, difficulty, and algorithm.
 pub struct PoW {
     data: Vec<u8>,
     difficulty: usize,
     algorithm: PoWAlgorithm,
+    mode: DifficultyMode,
 }
 
 impl PoW {
@@ -131,24 +149,52 @@ impl PoW {
             data: serde_json::to_vec(&data).unwrap(),
             difficulty,
             algorithm,
+            mode: DifficultyMode::AsciiZeroPrefix,
         })
     }
 
-    /// Calculates the target of zeros based on the difficulty
+    /// Creates a new instance of PoW with explicit difficulty mode.
+    pub fn with_mode(
+        data: impl Serialize,
+        difficulty: usize,
+        algorithm: PoWAlgorithm,
+        mode: DifficultyMode,
+    ) -> Result<Self, String> {
+        Ok(PoW {
+            data: serde_json::to_vec(&data).unwrap(),
+            difficulty,
+            algorithm,
+            mode,
+        })
+    }
+
+    /// Calculates the target of ASCII '0' bytes based on difficulty.
+    ///
+    /// Note: meaningful only for `AsciiZeroPrefix` mode; ignored for `LeadingZeroBits`.
     pub fn calculate_target(&self) -> Vec<u8> {
         // 0x30 is code for ascii character '0'
         vec![0x30u8; self.difficulty]
     }
 
     /// Calculates PoW with the given target hash.
+    /// For `AsciiZeroPrefix`, the `target` must be the ASCII '0' prefix of length `difficulty`.
+    /// For `LeadingZeroBits`, `target` is ignored; `difficulty` is interpreted as bit count.
     pub fn calculate_pow(&self, target: &[u8]) -> (Vec<u8>, usize) {
         let mut nonce = 0;
 
         loop {
             let hash = self.algorithm.calculate(&self.data, nonce);
-
-            if &hash[..target.len()] == target {
-                return (hash, nonce);
+            match self.mode {
+                DifficultyMode::AsciiZeroPrefix => {
+                    if &hash[..target.len()] == target {
+                        return (hash, nonce);
+                    }
+                }
+                DifficultyMode::LeadingZeroBits => {
+                    if meets_leading_zero_bits(&hash, self.difficulty as u32) {
+                        return (hash, nonce);
+                    }
+                }
             }
             nonce += 1;
         }
@@ -159,11 +205,22 @@ impl PoW {
         let (hash, nonce) = pow_result;
 
         let calculated_hash = self.algorithm.calculate(&self.data, nonce);
-
-        if &calculated_hash[..target.len()] == target && calculated_hash == hash {
-            return true;
+        match self.mode {
+            DifficultyMode::AsciiZeroPrefix => {
+                if &calculated_hash[..target.len()] == target && calculated_hash == hash {
+                    return true;
+                }
+                false
+            }
+            DifficultyMode::LeadingZeroBits => {
+                if meets_leading_zero_bits(&calculated_hash, self.difficulty as u32)
+                    && calculated_hash == hash
+                {
+                    return true;
+                }
+                false
+            }
         }
-        false
     }
 }
 
@@ -265,6 +322,20 @@ mod tests {
         assert!(hash.starts_with(&target[..difficulty]));
 
         assert!(pow.verify_pow(&target, (hash.clone(), nonce)));
+    }
+
+    #[test]
+    fn test_pow_calculate_pow_leading_zero_bits() {
+        // Use fast hash to keep test time acceptable.
+        let data = "hello world";
+        let bits = 8; // ~256 expected tries
+        let algorithm = PoWAlgorithm::Sha2_256;
+        let pow = PoW::with_mode(data, bits, algorithm, DifficultyMode::LeadingZeroBits).unwrap();
+
+        // target is ignored for bits mode; pass empty slice for clarity.
+        let (hash, nonce) = pow.calculate_pow(&[]);
+        assert!(meets_leading_zero_bits(&hash, bits as u32));
+        assert!(pow.verify_pow(&[], (hash, nonce)));
     }
 
     // -------- 按比特前缀判定工具函数测试 --------
