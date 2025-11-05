@@ -223,7 +223,7 @@ pub mod bench {
         mode: &str,
     ) -> String {
         format!(
-            "summary,{algo},{mode},{m_kib},{t_cost},{p_cost},{data_len},{bits},,,,,{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{},{},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{},{}",
+            "summary,{algo},{mode},{m_kib},{t_cost},{p_cost},{data_len},{bits},,,,,,{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{},{},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{},{}",
             summary.mean_time_ms,
             summary.std_time_ms,
             summary.stderr_time_ms,
@@ -362,6 +362,49 @@ pub mod bench {
             assert_eq!(summary.mean_tries, 7.0);
             assert_eq!(summary.std_tries, 0.0);
             assert_eq!(summary.stderr_tries, 0.0);
+        }
+
+        #[test]
+        fn csv_alignment_summary_columns() {
+            let header = csv_header();
+            let h: Vec<&str> = header.split(',').collect();
+            // Build a tiny summary from two outcomes
+            let outcomes = [
+                BenchOutcome {
+                    bits: 1,
+                    data_len: 4,
+                    time_ms: 10,
+                    tries: 2,
+                    nonce: 0,
+                    hash_hex: String::new(),
+                    m_kib: 8,
+                    t_cost: 1,
+                    p_cost: 1,
+                },
+                BenchOutcome {
+                    bits: 1,
+                    data_len: 4,
+                    time_ms: 20,
+                    tries: 4,
+                    nonce: 0,
+                    hash_hex: String::new(),
+                    m_kib: 8,
+                    t_cost: 1,
+                    p_cost: 1,
+                },
+            ];
+            let s = summarize(&outcomes).unwrap();
+            let row = csv_row_summary(1, 4, 8, 1, 1, &s, "argon2id", "leading_zero_bits");
+            let c: Vec<&str> = row.split(',').collect();
+            assert_eq!(h.len(), c.len(), "header/row column count mismatch");
+            // Header indices (1-based): 19=ci99_low_time_ms, 20=ci99_high_time_ms
+            let ci99_low_time: f64 = c[18].parse().unwrap();
+            let ci99_high_time: f64 = c[19].parse().unwrap();
+            assert!(ci99_low_time <= ci99_high_time);
+            // 28=ci99_low_tries, 29=ci99_high_tries (1-based)
+            let ci99_low_tries: f64 = c[27].parse().unwrap();
+            let ci99_high_tries: f64 = c[28].parse().unwrap();
+            assert!(ci99_low_tries <= ci99_high_tries);
         }
     }
 }
