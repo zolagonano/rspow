@@ -31,7 +31,13 @@ fn run() -> Result<(), String> {
 
     for run_idx in 0..cfg.repeats {
         let seed = derive_seed(cfg.seed_hex.as_deref(), run_idx)?;
-        let kpow = KPow::new(cfg.bits, params.clone(), cfg.workers, seed, cfg.payload.clone());
+        let kpow = KPow::new(
+            cfg.bits,
+            params.clone(),
+            cfg.workers,
+            seed,
+            cfg.payload.clone(),
+        );
         let (_proofs, stats) = kpow.solve_proofs_with_stats(cfg.k as usize)?;
         times.push(stats.total_time_ms as f64);
         tries.push(stats.total_tries as f64);
@@ -162,7 +168,9 @@ fn parse_args() -> Result<Cfg, String> {
 }
 
 fn parse_next<T: FromStr>(it: &mut impl Iterator<Item = String>, flag: &str) -> Result<T, String> {
-    let v = it.next().ok_or_else(|| format!("{flag} requires a value"))?;
+    let v = it
+        .next()
+        .ok_or_else(|| format!("{flag} requires a value"))?;
     v.parse::<T>()
         .map_err(|_| format!("invalid value for {flag}"))
 }
@@ -240,5 +248,13 @@ fn summarize(xs: &[f64]) -> Summary {
     const Z99: f64 = 2.575_829_303_548_900_4;
     let (ci95_low, ci95_high) = (mean - Z95 * stderr, mean + Z95 * stderr);
     let (ci99_low, ci99_high) = (mean - Z99 * stderr, mean + Z99 * stderr);
-    Summary { mean, std, stderr, ci95_low, ci95_high, ci99_low, ci99_high }
+    Summary {
+        mean,
+        std,
+        stderr,
+        ci95_low,
+        ci95_high,
+        ci99_low,
+        ci99_high,
+    }
 }
