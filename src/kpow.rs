@@ -227,16 +227,29 @@ impl KPow {
         let params = self.params.clone();
         let bits = self.bits;
 
-        struct PuzzleAtomics { done: AtomicBool, next_nonce: AtomicU64 }
-        let atoms: Arc<Vec<PuzzleAtomics>> = Arc::new((0..k)
-            .map(|_| PuzzleAtomics{ done: AtomicBool::new(false), next_nonce: AtomicU64::new(0) })
-            .collect());
+        struct PuzzleAtomics {
+            done: AtomicBool,
+            next_nonce: AtomicU64,
+        }
+        let atoms: Arc<Vec<PuzzleAtomics>> = Arc::new(
+            (0..k)
+                .map(|_| PuzzleAtomics {
+                    done: AtomicBool::new(false),
+                    next_nonce: AtomicU64::new(0),
+                })
+                .collect(),
+        );
 
-        let proofs_by_idx: Arc<Vec<Mutex<Option<KProof>>>> = Arc::new((0..k).map(|_| Mutex::new(None)).collect());
+        let proofs_by_idx: Arc<Vec<Mutex<Option<KProof>>>> =
+            Arc::new((0..k).map(|_| Mutex::new(None)).collect());
         let stop = Arc::new(AtomicBool::new(false));
         let successes = Arc::new(AtomicUsize::new(0));
         let total_tries_atomic = Arc::new(AtomicU64::new(0));
-        let start = if with_stats { Some(Instant::now()) } else { None };
+        let start = if with_stats {
+            Some(Instant::now())
+        } else {
+            None
+        };
 
         let mut joins = Vec::with_capacity(self.workers);
         for t_id in 0..self.workers {
@@ -252,17 +265,26 @@ impl KPow {
             let j = thread::spawn(move || {
                 let mut cursor = t_id % k_local;
                 loop {
-                    if stop_flag.load(Ordering::Relaxed) { break; }
+                    if stop_flag.load(Ordering::Relaxed) {
+                        break;
+                    }
                     let mut did_work = false;
                     for step in 0..k_local {
-                        if stop_flag.load(Ordering::Relaxed) { break; }
+                        if stop_flag.load(Ordering::Relaxed) {
+                            break;
+                        }
                         let idx = (cursor + step) % k_local;
                         let a = &atoms[idx];
-                        if a.done.load(Ordering::Relaxed) { continue; }
+                        if a.done.load(Ordering::Relaxed) {
+                            continue;
+                        }
                         let n = a.next_nonce.fetch_add(1, Ordering::Relaxed);
-                        if a.done.load(Ordering::Relaxed) { continue; }
+                        if a.done.load(Ordering::Relaxed) {
+                            continue;
+                        }
                         let data = puzzles[idx];
-                        let hash = PoWAlgorithm::Argon2id(params.clone()).calculate(&data, n as usize);
+                        let hash =
+                            PoWAlgorithm::Argon2id(params.clone()).calculate(&data, n as usize);
                         tries_ctr.fetch_add(1, Ordering::Relaxed);
                         if meets_leading_zero_bits(&hash, bits_local)
                             && !a.done.swap(true, Ordering::SeqCst)
@@ -270,7 +292,11 @@ impl KPow {
                             let mut h32 = [0u8; 32];
                             h32.copy_from_slice(&hash);
                             if let Ok(mut slot) = proofs_by_idx[idx].lock() {
-                                *slot = Some(KProof { index: idx, nonce: n, hash: h32 });
+                                *slot = Some(KProof {
+                                    index: idx,
+                                    nonce: n,
+                                    hash: h32,
+                                });
                             }
                             let prev = successes_ctr.fetch_add(1, Ordering::SeqCst) + 1;
                             if prev >= k_local {
@@ -278,27 +304,43 @@ impl KPow {
                             }
                         }
                         did_work = true;
-                        if stop_flag.load(Ordering::Relaxed) { break; }
+                        if stop_flag.load(Ordering::Relaxed) {
+                            break;
+                        }
                     }
                     cursor = (cursor + 1) % k_local;
-                    if !did_work { thread::yield_now(); }
+                    if !did_work {
+                        thread::yield_now();
+                    }
                 }
             });
             joins.push(j);
         }
 
-        for j in joins { let _ = j.join(); }
+        for j in joins {
+            let _ = j.join();
+        }
 
         let mut proofs: Vec<KProof> = Vec::with_capacity(k);
         for (i, m) in proofs_by_idx.iter().enumerate() {
             if let Ok(guard) = m.lock() {
-                if let Some(p) = &*guard { proofs.push(p.clone()); }
-            } else { let _ = i; }
+                if let Some(p) = &*guard {
+                    proofs.push(p.clone());
+                }
+            } else {
+                let _ = i;
+            }
         }
         let succ = successes.load(Ordering::Relaxed);
         let stats = if with_stats {
-            Some(KPowResult { total_time_ms: start.unwrap().elapsed().as_millis(), total_tries: total_tries_atomic.load(Ordering::Relaxed), successes: succ })
-        } else { None };
+            Some(KPowResult {
+                total_time_ms: start.unwrap().elapsed().as_millis(),
+                total_tries: total_tries_atomic.load(Ordering::Relaxed),
+                successes: succ,
+            })
+        } else {
+            None
+        };
         Ok((proofs, stats))
     }
 }
