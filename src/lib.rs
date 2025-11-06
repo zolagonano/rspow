@@ -1,12 +1,43 @@
-use argon2::Argon2;
+//! RSPOW: simple multi-algorithm proof-of-work utilities.
+//!
+//! Supported algorithms:
+//! - SHA-256, SHA-512, RIPEMD-320
+//! - Scrypt, Argon2id (with custom `Params`)
+//!
+//! Difficulty modes:
+//! - `AsciiZeroPrefix` (default): hash must start with `difficulty` bytes of ASCII '0' (0x30).
+//! - `LeadingZeroBits`: hash must have at least `difficulty` leading zero bits (big-endian within bytes).
+//!
+//! Quick examples:
+//!
+//! ```rust
+//! use rspow::{PoW, PoWAlgorithm};
+//!
+//! let data = "hello";
+//! let algorithm = PoWAlgorithm::Sha2_256;
+//! let pow = PoW::new(data, 2, algorithm).unwrap();
+//! let target = pow.calculate_target();
+//! let (_hash, _nonce) = pow.calculate_pow(&target);
+//! ```
+//!
+//! ```rust
+//! use rspow::{PoW, PoWAlgorithm, DifficultyMode};
+//!
+//! let data = "hello";
+//! let pow = PoW::with_mode(data, 10, PoWAlgorithm::Sha2_256, DifficultyMode::LeadingZeroBits).unwrap();
+//! let (_hash, _nonce) = pow.calculate_pow(&[]); // target ignored in bits mode
+//! ```
+//!
+use argon2::{Argon2, Algorithm, Version};
 use ripemd::Ripemd320;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use sha2::{Digest, Sha256, Sha512};
 
 pub use argon2::Params as Argon2Params;
 pub use scrypt::Params as ScryptParams;
 
 /// Enum defining different Proof of Work (PoW) algorithms.
+#[allow(non_camel_case_types)]
 pub enum PoWAlgorithm {
     Sha2_256,
     Sha2_512,
@@ -56,7 +87,7 @@ impl PoWAlgorithm {
     pub fn calculate_scrypt(data: &[u8], nonce: usize, params: &ScryptParams) -> Vec<u8> {
         let mut output = vec![0; 32];
 
-        scrypt::scrypt(data, &nonce.to_le_bytes(), params, &mut output);
+        let _ = scrypt::scrypt(data, &nonce.to_le_bytes(), params, &mut output);
 
         output
     }
@@ -64,8 +95,8 @@ impl PoWAlgorithm {
     /// Calculates Scrypt hash with given data and nonce.
     pub fn calculate_argon2id(data: &[u8], nonce: usize, params: &Argon2Params) -> Vec<u8> {
         let mut output = vec![0; 32];
-        Argon2::default()
-            .hash_password_into(data, &nonce.to_le_bytes(), &mut output)
+        let a2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params.to_owned());
+        a2.hash_password_into(data, &nonce.to_le_bytes(), &mut output)
             .unwrap();
 
         output
@@ -76,11 +107,57 @@ impl PoWAlgorithm {
         match self {
             Self::Sha2_256 => Self::calculate_sha2_256(data, nonce),
             Self::Sha2_512 => Self::calculate_sha2_512(data, nonce),
-            Self::RIPEMD_320 => Self::calculate_sha2_512(data, nonce),
+            Self::RIPEMD_320 => Self::calculate_ripemd_320(data, nonce),
             Self::Scrypt(params) => Self::calculate_scrypt(data, nonce, params),
             Self::Argon2id(params) => Self::calculate_argon2id(data, nonce, params),
         }
     }
+}
+
+/// Utility: check whether `hash` has at least `bits` leading zero bits.
+///
+/// Convention: count leading zero bits in big-endian bit order within each byte
+/// (i.e., the most significant bit is checked first).
+/// - When `bits == 0`, return `true`.
+/// - When `bits > hash.len() * 8`, return `false`.
+pub fn meets_leading_zero_bits(hash: &[u8], bits: u32) -> bool {
+    if bits == 0 {
+        return true;
+    }
+    let total_bits = (hash.len() as u32) * 8;
+    if bits > total_bits {
+        return false;
+    }
+
+    let full_bytes = (bits / 8) as usize;
+    let rem_bits = (bits % 8) as u8;
+
+    // Full-zero check for bytes fully covered by `bits`.
+    for b in hash.iter().take(full_bytes) {
+        if *b != 0 {
+            return false;
+        }
+    }
+
+    // Remaining high bits in the next byte must be zero as well.
+    if rem_bits > 0 {
+        let b = hash[full_bytes];
+        let mask = 0xFFu8 << (8 - rem_bits);
+        if (b & mask) != 0 {
+            return false;
+        }
+    }
+
+    true
+}
+
+/// Difficulty modes supported by PoW.
+#[derive(Clone, Copy)]
+pub enum DifficultyMode {
+    /// Legacy mode: prefix must be ASCII '0' bytes (0x30), one per difficulty level.
+    AsciiZeroPrefix,
+    /// New mode: require a given number of leading zero bits.
+    LeadingZeroBits,
 }
 
 /// Struct representing Proof of Work (PoW) with data, difficulty, and algorithm.
@@ -88,6 +165,7 @@ pub struct PoW {
     data: Vec<u8>,
     difficulty: usize,
     algorithm: PoWAlgorithm,
+    mode: DifficultyMode,
 }
 
 impl PoW {
@@ -101,24 +179,52 @@ impl PoW {
             data: serde_json::to_vec(&data).unwrap(),
             difficulty,
             algorithm,
+            mode: DifficultyMode::AsciiZeroPrefix,
         })
     }
 
-    /// Calculates the target of zeros based on the difficulty
+    /// Creates a new instance of PoW with explicit difficulty mode.
+    pub fn with_mode(
+        data: impl Serialize,
+        difficulty: usize,
+        algorithm: PoWAlgorithm,
+        mode: DifficultyMode,
+    ) -> Result<Self, String> {
+        Ok(PoW {
+            data: serde_json::to_vec(&data).unwrap(),
+            difficulty,
+            algorithm,
+            mode,
+        })
+    }
+
+    /// Calculates the target of ASCII '0' bytes based on difficulty.
+    ///
+    /// Note: meaningful only for `AsciiZeroPrefix` mode; ignored for `LeadingZeroBits`.
     pub fn calculate_target(&self) -> Vec<u8> {
         // 0x30 is code for ascii character '0'
         vec![0x30u8; self.difficulty]
     }
 
     /// Calculates PoW with the given target hash.
+    /// For `AsciiZeroPrefix`, the `target` must be the ASCII '0' prefix of length `difficulty`.
+    /// For `LeadingZeroBits`, `target` is ignored; `difficulty` is interpreted as bit count.
     pub fn calculate_pow(&self, target: &[u8]) -> (Vec<u8>, usize) {
         let mut nonce = 0;
 
         loop {
             let hash = self.algorithm.calculate(&self.data, nonce);
-
-            if &hash[..target.len()] == target {
-                return (hash, nonce);
+            match self.mode {
+                DifficultyMode::AsciiZeroPrefix => {
+                    if &hash[..target.len()] == target {
+                        return (hash, nonce);
+                    }
+                }
+                DifficultyMode::LeadingZeroBits => {
+                    if meets_leading_zero_bits(&hash, self.difficulty as u32) {
+                        return (hash, nonce);
+                    }
+                }
             }
             nonce += 1;
         }
@@ -129,11 +235,22 @@ impl PoW {
         let (hash, nonce) = pow_result;
 
         let calculated_hash = self.algorithm.calculate(&self.data, nonce);
-
-        if &calculated_hash[..target.len()] == target && calculated_hash == hash {
-            return true;
+        match self.mode {
+            DifficultyMode::AsciiZeroPrefix => {
+                if &calculated_hash[..target.len()] == target && calculated_hash == hash {
+                    return true;
+                }
+                false
+            }
+            DifficultyMode::LeadingZeroBits => {
+                if meets_leading_zero_bits(&calculated_hash, self.difficulty as u32)
+                    && calculated_hash == hash
+                {
+                    return true;
+                }
+                false
+            }
         }
-        false
     }
 }
 
@@ -185,6 +302,15 @@ mod tests {
     }
 
     #[test]
+    fn test_pow_algorithm_dispatch_ripemd_320() {
+        let data = b"hello world";
+        let nonce = 12345;
+        let via_dispatch = PoWAlgorithm::RIPEMD_320.calculate(data, nonce);
+        let direct = PoWAlgorithm::calculate_ripemd_320(data, nonce);
+        assert_eq!(via_dispatch, direct);
+    }
+
+    #[test]
     fn test_pow_algorithm_scrypt() {
         let data = b"hello world";
         let nonce = 12345;
@@ -205,8 +331,8 @@ mod tests {
         let nonce = 12345;
         let params = Argon2Params::new(16, 2, 2, None).unwrap();
         let expected_hash = [
-            121, 222, 173, 128, 44, 161, 236, 9, 56, 163, 21, 161, 111, 241, 182, 60, 144, 77, 206,
-            200, 220, 147, 149, 223, 6, 115, 230, 200, 155, 53, 29, 42,
+            243, 150, 29, 238, 126, 244, 47, 122, 69, 22, 69, 20, 102, 5, 218, 124,
+            251, 140, 204, 53, 133, 2, 147, 207, 66, 17, 241, 177, 20, 249, 251, 155,
         ];
 
         let hash = PoWAlgorithm::calculate_argon2id(data, nonce, &params);
@@ -226,5 +352,56 @@ mod tests {
         assert!(hash.starts_with(&target[..difficulty]));
 
         assert!(pow.verify_pow(&target, (hash.clone(), nonce)));
+    }
+
+    #[test]
+    fn test_pow_calculate_pow_leading_zero_bits() {
+        // Use fast hash to keep test time acceptable.
+        let data = "hello world";
+        let bits = 8; // ~256 expected tries
+        let algorithm = PoWAlgorithm::Sha2_256;
+        let pow = PoW::with_mode(data, bits, algorithm, DifficultyMode::LeadingZeroBits).unwrap();
+
+        // target is ignored for bits mode; pass empty slice for clarity.
+        let (hash, nonce) = pow.calculate_pow(&[]);
+        assert!(meets_leading_zero_bits(&hash, bits as u32));
+        assert!(pow.verify_pow(&[], (hash, nonce)));
+    }
+
+    // -------- 按比特前缀判定工具函数测试 --------
+    #[test]
+    fn test_meets_leading_zero_bits_basic() {
+        // 0x00 0x00 0xFF -> 前 16 比特均为 0，第 17 比特为 1
+        let h = [0x00u8, 0x00u8, 0xFFu8];
+        assert!(meets_leading_zero_bits(&h, 0));
+        assert!(meets_leading_zero_bits(&h, 1));
+        assert!(meets_leading_zero_bits(&h, 7));
+        assert!(meets_leading_zero_bits(&h, 8));
+        assert!(meets_leading_zero_bits(&h, 9));
+        assert!(meets_leading_zero_bits(&h, 15));
+        assert!(meets_leading_zero_bits(&h, 16));
+        assert!(!meets_leading_zero_bits(&h, 17));
+    }
+
+    #[test]
+    fn test_meets_leading_zero_bits_edges() {
+        // 最高位为 1：0x80 -> 1000_0000
+        let h1 = [0x80u8, 0x00u8];
+        assert!(!meets_leading_zero_bits(&h1, 1));
+
+        // 0x7F -> 0111_1111，前导零仅 1 位
+        let h2 = [0x7Fu8, 0xFFu8];
+        assert!(meets_leading_zero_bits(&h2, 1));
+        assert!(!meets_leading_zero_bits(&h2, 2));
+
+        // 0x00 0x80：前 8 位为 0，第 9 位为 1
+        let h3 = [0x00u8, 0x80u8];
+        assert!(meets_leading_zero_bits(&h3, 8));
+        assert!(!meets_leading_zero_bits(&h3, 9));
+
+        // 长度不足：bits 超出可用位数
+        let h4 = [0x00u8, 0x00u8, 0x00u8];
+        assert!(meets_leading_zero_bits(&h4, 24));
+        assert!(!meets_leading_zero_bits(&h4, 25));
     }
 }
