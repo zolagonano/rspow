@@ -30,7 +30,7 @@
 //!
 use argon2::{Algorithm, Argon2, Version};
 use ripemd::Ripemd320;
-use serde::Serialize;
+use serde::{ser::SerializeStruct, Deserialize, Serialize};
 use sha2::{Digest, Sha256, Sha512};
 
 pub use argon2::Params as Argon2Params;
@@ -415,6 +415,7 @@ pub mod bench {
 
 /// Enum defining different Proof of Work (PoW) algorithms.
 #[allow(non_camel_case_types)]
+#[derive(Clone, Debug)]
 pub enum PoWAlgorithm {
     Sha2_256,
     Sha2_512,
@@ -529,7 +530,7 @@ pub fn meets_leading_zero_bits(hash: &[u8], bits: u32) -> bool {
 }
 
 /// Difficulty modes supported by PoW.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub enum DifficultyMode {
     /// Legacy mode: prefix must be ASCII '0' bytes (0x30), one per difficulty level.
     AsciiZeroPrefix,
@@ -538,11 +539,279 @@ pub enum DifficultyMode {
 }
 
 /// Struct representing Proof of Work (PoW) with data, difficulty, and algorithm.
+#[derive(Clone, Debug)]
 pub struct PoW {
     data: Vec<u8>,
     difficulty: usize,
     algorithm: PoWAlgorithm,
     mode: DifficultyMode,
+}
+
+// ---- Eq / PartialEq / Hash for DifficultyMode, PoWAlgorithm, PoW ----
+
+impl PartialEq for DifficultyMode {
+    fn eq(&self, other: &Self) -> bool {
+        matches!(
+            (self, other),
+            (Self::AsciiZeroPrefix, Self::AsciiZeroPrefix)
+                | (Self::LeadingZeroBits, Self::LeadingZeroBits)
+        )
+    }
+}
+impl Eq for DifficultyMode {}
+impl std::hash::Hash for DifficultyMode {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        match self {
+            DifficultyMode::AsciiZeroPrefix => 0u8.hash(state),
+            DifficultyMode::LeadingZeroBits => 1u8.hash(state),
+        }
+    }
+}
+
+impl PartialEq for PoWAlgorithm {
+    fn eq(&self, other: &Self) -> bool {
+        use PoWAlgorithm::*;
+        match (self, other) {
+            (Sha2_256, Sha2_256) => true,
+            (Sha2_512, Sha2_512) => true,
+            (RIPEMD_320, RIPEMD_320) => true,
+            (Scrypt(a), Scrypt(b)) => a.log_n() == b.log_n() && a.r() == b.r() && a.p() == b.p(),
+            (Argon2id(a), Argon2id(b)) => {
+                a.m_cost() == b.m_cost() && a.t_cost() == b.t_cost() && a.p_cost() == b.p_cost()
+            }
+            _ => false,
+        }
+    }
+}
+impl Eq for PoWAlgorithm {}
+impl std::hash::Hash for PoWAlgorithm {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        use PoWAlgorithm::*;
+        match self {
+            Sha2_256 => 0u8.hash(state),
+            Sha2_512 => 1u8.hash(state),
+            RIPEMD_320 => 2u8.hash(state),
+            Scrypt(p) => {
+                3u8.hash(state);
+                p.log_n().hash(state);
+                p.r().hash(state);
+                p.p().hash(state);
+            }
+            Argon2id(p) => {
+                4u8.hash(state);
+                p.m_cost().hash(state);
+                p.t_cost().hash(state);
+                p.p_cost().hash(state);
+            }
+        }
+    }
+}
+
+impl PartialEq for PoW {
+    fn eq(&self, other: &Self) -> bool {
+        self.data == other.data
+            && self.difficulty == other.difficulty
+            && self.algorithm == other.algorithm
+            && self.mode == other.mode
+    }
+}
+impl Eq for PoW {}
+impl std::hash::Hash for PoW {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.data.hash(state);
+        self.difficulty.hash(state);
+        self.algorithm.hash(state);
+        self.mode.hash(state);
+    }
+}
+
+// ---- Serde for DifficultyMode, PoWAlgorithm, PoW ----
+
+impl Serialize for DifficultyMode {
+    fn serialize<S>(
+        &self,
+        serializer: S,
+    ) -> Result<<S as serde::Serializer>::Ok, <S as serde::Serializer>::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            DifficultyMode::AsciiZeroPrefix => serializer.serialize_str("AsciiZeroPrefix"),
+            DifficultyMode::LeadingZeroBits => serializer.serialize_str("LeadingZeroBits"),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for DifficultyMode {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        match s.as_str() {
+            "AsciiZeroPrefix" => Ok(DifficultyMode::AsciiZeroPrefix),
+            "LeadingZeroBits" => Ok(DifficultyMode::LeadingZeroBits),
+            other => Err(serde::de::Error::unknown_variant(
+                other,
+                &["AsciiZeroPrefix", "LeadingZeroBits"],
+            )),
+        }
+    }
+}
+
+impl Serialize for PoWAlgorithm {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use PoWAlgorithm::*;
+        match self {
+            Sha2_256 => serializer.serialize_str("Sha2_256"),
+            Sha2_512 => serializer.serialize_str("Sha2_512"),
+            RIPEMD_320 => serializer.serialize_str("RIPEMD_320"),
+            Scrypt(p) => {
+                #[derive(Serialize)]
+                struct ScryptParamsSer {
+                    log_n: u8,
+                    r: u32,
+                    p: u32,
+                }
+                let wrapper = ScryptParamsSer {
+                    log_n: p.log_n(),
+                    r: p.r(),
+                    p: p.p(),
+                };
+                let mut st = serializer.serialize_struct("Scrypt", 1)?;
+                st.serialize_field("Scrypt", &wrapper)?;
+                st.end()
+            }
+            Argon2id(p) => {
+                #[derive(Serialize)]
+                struct Argon2ParamsSer {
+                    m_kib: u32,
+                    t_cost: u32,
+                    p_cost: u32,
+                }
+                let wrapper = Argon2ParamsSer {
+                    m_kib: p.m_cost(),
+                    t_cost: p.t_cost(),
+                    p_cost: p.p_cost(),
+                };
+                let mut st = serializer.serialize_struct("Argon2id", 1)?;
+                st.serialize_field("Argon2id", &wrapper)?;
+                st.end()
+            }
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for PoWAlgorithm {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::{Error, MapAccess, Visitor};
+        use std::fmt;
+
+        // Accept either a unit string variant or an object {Variant: {..}} for params variants
+        struct AlgoVisitor;
+        impl<'de> Visitor<'de> for AlgoVisitor {
+            type Value = PoWAlgorithm;
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("PoWAlgorithm as string or single-key object")
+            }
+            fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+            where
+                E: Error,
+            {
+                match v {
+                    "Sha2_256" => Ok(PoWAlgorithm::Sha2_256),
+                    "Sha2_512" => Ok(PoWAlgorithm::Sha2_512),
+                    "RIPEMD_320" => Ok(PoWAlgorithm::RIPEMD_320),
+                    _ => Err(E::unknown_variant(
+                        v,
+                        &["Sha2_256", "Sha2_512", "RIPEMD_320", "Scrypt", "Argon2id"],
+                    )),
+                }
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                if let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "Scrypt" => {
+                            #[derive(Deserialize)]
+                            struct ScryptParamsDe {
+                                log_n: u8,
+                                r: u32,
+                                p: u32,
+                            }
+                            let p = map.next_value::<ScryptParamsDe>()?;
+                            // We default to 32 bytes output length which matches this crate's use.
+                            let params = ScryptParams::new(p.log_n, p.r, p.p, 32)
+                                .map_err(|e| A::Error::custom(e.to_string()))?;
+                            Ok(PoWAlgorithm::Scrypt(params))
+                        }
+                        "Argon2id" => {
+                            #[derive(Deserialize)]
+                            struct Argon2ParamsDe {
+                                m_kib: u32,
+                                t_cost: u32,
+                                p_cost: u32,
+                            }
+                            let p = map.next_value::<Argon2ParamsDe>()?;
+                            let params = Argon2Params::new(p.m_kib, p.t_cost, p.p_cost, None)
+                                .map_err(|e| A::Error::custom(e.to_string()))?;
+                            Ok(PoWAlgorithm::Argon2id(params))
+                        }
+                        other => Err(A::Error::unknown_field(other, &["Scrypt", "Argon2id"])),
+                    }
+                } else {
+                    Err(A::Error::custom("empty map for PoWAlgorithm"))
+                }
+            }
+        }
+        deserializer.deserialize_any(AlgoVisitor)
+    }
+}
+
+impl Serialize for PoW {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut st = serializer.serialize_struct("PoW", 4)?;
+        st.serialize_field("data", &self.data)?;
+        st.serialize_field("difficulty", &self.difficulty)?;
+        st.serialize_field("algorithm", &self.algorithm)?;
+        st.serialize_field("mode", &self.mode)?;
+        st.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for PoW {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct PoWDe {
+            data: Vec<u8>,
+            difficulty: usize,
+            algorithm: PoWAlgorithm,
+            mode: DifficultyMode,
+        }
+        let raw = PoWDe::deserialize(deserializer)?;
+        Ok(PoW {
+            data: raw.data,
+            difficulty: raw.difficulty,
+            algorithm: raw.algorithm,
+            mode: raw.mode,
+        })
+    }
 }
 
 impl PoW {
@@ -634,6 +903,8 @@ impl PoW {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::{from_str, to_string};
+    use std::collections::HashSet;
 
     #[test]
     fn test_pow_algorithm_sha2_256() {
@@ -780,5 +1051,51 @@ mod tests {
         let h4 = [0x00u8, 0x00u8, 0x00u8];
         assert!(meets_leading_zero_bits(&h4, 24));
         assert!(!meets_leading_zero_bits(&h4, 25));
+    }
+
+    // -------- 新增：serde/eq/hash 回归测试 --------
+    #[test]
+    fn serde_roundtrip_powalgorithm_variants() {
+        let a1 = PoWAlgorithm::Sha2_256;
+        let s1 = to_string(&a1).unwrap();
+        let b1: PoWAlgorithm = from_str(&s1).unwrap();
+        assert_eq!(a1, b1);
+
+        let a2 = PoWAlgorithm::Argon2id(Argon2Params::new(16, 2, 1, None).unwrap());
+        let s2 = to_string(&a2).unwrap();
+        let b2: PoWAlgorithm = from_str(&s2).unwrap();
+        assert_eq!(a2, b2);
+
+        let a3 = PoWAlgorithm::Scrypt(ScryptParams::new(8, 4, 1, 32).unwrap());
+        let s3 = to_string(&a3).unwrap();
+        let b3: PoWAlgorithm = from_str(&s3).unwrap();
+        assert_eq!(a3, b3);
+    }
+
+    #[test]
+    fn serde_roundtrip_pow() {
+        let pow = PoW::with_mode(
+            "data",
+            12,
+            PoWAlgorithm::Sha2_256,
+            DifficultyMode::LeadingZeroBits,
+        )
+        .unwrap();
+        let s = to_string(&pow).unwrap();
+        let back: PoW = from_str(&s).unwrap();
+        assert_eq!(pow, back);
+    }
+
+    #[test]
+    fn hash_set_pow_and_algo() {
+        let pow = PoW::new("hi", 2, PoWAlgorithm::Sha2_512).unwrap();
+        let mut hs = HashSet::new();
+        hs.insert(pow.clone());
+        assert!(hs.contains(&pow));
+
+        let algo = PoWAlgorithm::Argon2id(Argon2Params::new(32, 3, 2, None).unwrap());
+        let mut hs2 = HashSet::new();
+        hs2.insert(algo.clone());
+        assert!(hs2.contains(&algo));
     }
 }
