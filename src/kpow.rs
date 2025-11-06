@@ -215,8 +215,7 @@ impl KPow {
         k: usize,
         with_stats: bool,
     ) -> Result<(Vec<KProof>, Option<KPowResult>), String> {
-        use std::sync::atomic::{AtomicBool, Ordering};
-        use std::sync::mpsc;
+        use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
         use std::sync::{Arc, Mutex};
         use std::thread;
 
@@ -228,147 +227,78 @@ impl KPow {
         let params = self.params.clone();
         let bits = self.bits;
 
-        // Task and result channels
-        #[derive(Clone, Copy)]
-        struct Task {
-            idx: usize,
-            nonce: u64,
-        }
-        #[derive(Clone, Copy)]
-        struct Res {
-            idx: usize,
-            nonce: u64,
-            ok: bool,
-            hash: [u8; 32],
-        }
+        struct PuzzleAtomics { done: AtomicBool, next_nonce: AtomicU64 }
+        let atoms: Arc<Vec<PuzzleAtomics>> = Arc::new((0..k)
+            .map(|_| PuzzleAtomics{ done: AtomicBool::new(false), next_nonce: AtomicU64::new(0) })
+            .collect());
 
-        let (task_tx, task_rx) = mpsc::channel::<Task>();
-        let task_rx = Arc::new(Mutex::new(task_rx));
-        let (res_tx, res_rx) = mpsc::channel::<Res>();
+        let proofs_by_idx: Arc<Vec<Mutex<Option<KProof>>>> = Arc::new((0..k).map(|_| Mutex::new(None)).collect());
         let stop = Arc::new(AtomicBool::new(false));
+        let successes = Arc::new(AtomicUsize::new(0));
+        let total_tries_atomic = Arc::new(AtomicU64::new(0));
+        let start = if with_stats { Some(Instant::now()) } else { None };
 
-        // Spawn workers
         let mut joins = Vec::with_capacity(self.workers);
-        for _ in 0..self.workers {
-            let rx = task_rx.clone();
-            let tx = res_tx.clone();
+        for t_id in 0..self.workers {
             let puzzles = puzzles.clone();
             let params = params.clone();
-            let stop = stop.clone();
-            let j = thread::spawn(move || loop {
-                let msg = {
-                    let lock = rx.lock().unwrap();
-                    lock.recv()
-                };
-                let Task { idx, nonce } = match msg {
-                    Ok(t) => t,
-                    Err(_) => break,
-                };
-                if stop.load(Ordering::Relaxed) {
-                    break;
+            let atoms = atoms.clone();
+            let proofs_by_idx = proofs_by_idx.clone();
+            let stop_flag = stop.clone();
+            let successes_ctr = successes.clone();
+            let tries_ctr = total_tries_atomic.clone();
+            let k_local = k;
+            let bits_local = bits;
+            let j = thread::spawn(move || {
+                let mut cursor = t_id % k_local;
+                loop {
+                    if stop_flag.load(Ordering::Relaxed) { break; }
+                    let mut did_work = false;
+                    for step in 0..k_local {
+                        if stop_flag.load(Ordering::Relaxed) { break; }
+                        let idx = (cursor + step) % k_local;
+                        let a = &atoms[idx];
+                        if a.done.load(Ordering::Relaxed) { continue; }
+                        let n = a.next_nonce.fetch_add(1, Ordering::Relaxed);
+                        if a.done.load(Ordering::Relaxed) { continue; }
+                        let data = puzzles[idx];
+                        let hash = PoWAlgorithm::Argon2id(params.clone()).calculate(&data, n as usize);
+                        tries_ctr.fetch_add(1, Ordering::Relaxed);
+                        if meets_leading_zero_bits(&hash, bits_local)
+                            && !a.done.swap(true, Ordering::SeqCst)
+                        {
+                            let mut h32 = [0u8; 32];
+                            h32.copy_from_slice(&hash);
+                            if let Ok(mut slot) = proofs_by_idx[idx].lock() {
+                                *slot = Some(KProof { index: idx, nonce: n, hash: h32 });
+                            }
+                            let prev = successes_ctr.fetch_add(1, Ordering::SeqCst) + 1;
+                            if prev >= k_local {
+                                stop_flag.store(true, Ordering::SeqCst);
+                            }
+                        }
+                        did_work = true;
+                        if stop_flag.load(Ordering::Relaxed) { break; }
+                    }
+                    cursor = (cursor + 1) % k_local;
+                    if !did_work { thread::yield_now(); }
                 }
-                let data = puzzles[idx];
-                let hash = PoWAlgorithm::Argon2id(params.clone()).calculate(&data, nonce as usize);
-                let ok = meets_leading_zero_bits(&hash, bits);
-                let mut h32 = [0u8; 32];
-                h32.copy_from_slice(&hash);
-                let _ = tx.send(Res {
-                    idx,
-                    nonce,
-                    ok,
-                    hash: h32,
-                });
             });
             joins.push(j);
         }
-        drop(res_tx); // receiver side stays; workers hold their own tx clone
 
-        // Scheduler state
-        struct State {
-            next_nonce: u64,
-            done: bool,
+        for j in joins { let _ = j.join(); }
+
+        let mut proofs: Vec<KProof> = Vec::with_capacity(k);
+        for (i, m) in proofs_by_idx.iter().enumerate() {
+            if let Ok(guard) = m.lock() {
+                if let Some(p) = &*guard { proofs.push(p.clone()); }
+            } else { let _ = i; }
         }
-        let mut states: Vec<State> = (0..k)
-            .map(|_| State {
-                next_nonce: 0,
-                done: false,
-            })
-            .collect();
-        let mut proofs_by_idx: Vec<Option<KProof>> = (0..k).map(|_| None).collect();
-
-        // Prime the queue: one task per puzzle
-        for i in 0..k {
-            task_tx
-                .send(Task { idx: i, nonce: 0 })
-                .map_err(|e| e.to_string())?;
-        }
-
-        let start = if with_stats {
-            Some(Instant::now())
-        } else {
-            None
-        };
-        let mut total_tries: u64 = 0;
-        let mut successes = 0usize;
-
-        while successes < k {
-            let Res {
-                idx,
-                nonce,
-                ok,
-                hash,
-            } = res_rx.recv().map_err(|e| e.to_string())?;
-            if with_stats {
-                total_tries += 1;
-            }
-
-            let st = &mut states[idx];
-            if st.done {
-                // Already completed, ignore any straggler result
-                continue;
-            }
-            if ok {
-                st.done = true;
-                successes += 1;
-                proofs_by_idx[idx] = Some(KProof {
-                    index: idx,
-                    nonce,
-                    hash,
-                });
-                if successes == k {
-                    stop.store(true, Ordering::Relaxed);
-                    break;
-                }
-            } else {
-                st.next_nonce = st
-                    .next_nonce
-                    .checked_add(1)
-                    .ok_or_else(|| "nonce overflow".to_owned())?;
-                task_tx
-                    .send(Task {
-                        idx,
-                        nonce: st.next_nonce,
-                    })
-                    .map_err(|e| e.to_string())?;
-            }
-        }
-
-        // Close task channel to let workers exit once they finish current task
-        drop(task_tx);
-        for j in joins {
-            let _ = j.join();
-        }
-
-        let proofs: Vec<KProof> = proofs_by_idx.into_iter().flatten().collect();
+        let succ = successes.load(Ordering::Relaxed);
         let stats = if with_stats {
-            Some(KPowResult {
-                total_time_ms: start.unwrap().elapsed().as_millis(),
-                total_tries,
-                successes,
-            })
-        } else {
-            None
-        };
+            Some(KPowResult { total_time_ms: start.unwrap().elapsed().as_millis(), total_tries: total_tries_atomic.load(Ordering::Relaxed), successes: succ })
+        } else { None };
         Ok((proofs, stats))
     }
 }
