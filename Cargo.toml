@@ -1,6 +1,6 @@
 [package]
 name = "rspow"
-version = "0.2.0"
+version = "0.3.0"
 authors = ["Zola Gonano <zolagonano@protonmail.com>"]
 description = "A multi-algorithm proof-of-work library in rust"
 homepage = "https://github.com/zolagonano/rspow.git"
