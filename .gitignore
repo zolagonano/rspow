@@ -2,3 +2,7 @@
 
 design_docs/
 AGENTS.md
+wasm-demo/pkg/
+wasm-demo/node_modules/
+wasm-demo/target/
+.aider*
