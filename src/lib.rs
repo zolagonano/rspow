@@ -1327,4 +1327,17 @@ mod tests {
         // bits=0 must pass; bits=1 may or may not pass — just check the trivial case.
         assert!(equix_check_bits(&seed, &proof, 0).unwrap());
     }
+
+    #[test]
+    fn test_equix_verify_rejects_tampered_solution() {
+        let mut seed_hasher = Sha256::new();
+        seed_hasher.update(b"seed-for-test-3");
+        let seed = seed_hasher.finalize();
+
+        // Find a valid proof (bits=0, trivial).
+        let (mut proof, _h) = equix_solve_with_bits(&seed, 0, 0).expect("solve");
+        // Tamper one byte in the solution; verify should fail.
+        proof.solution.0[0] ^= 0x01;
+        assert!(equix_verify_solution(&seed, &proof).is_err());
+    }
 }

@@ -80,6 +80,58 @@ let (hash, nonce) = pow.calculate_pow(&[]);
 assert!(hash.len() == 32);
 ```
 
+### EquiX proof-carrying API (O(1) verification)
+
+For production use, prefer a proof that carries the EquiX solution bytes so the server verifies in constant time without solving:
+
+```rust
+use rspow::{EquixProof, EquixSolution, equix_solve_with_bits, equix_verify_solution, equix_check_bits};
+use sha2::{Digest, Sha256};
+
+// Derive a domain-separated seed once per request
+let server_nonce = b"signed-token"; // signed & time-limited by the server
+let data = b"payload";
+let mut h = Sha256::new();
+h.update(b"rspow:equix:v1|");
+h.update(&(server_nonce.len() as u64).to_le_bytes());
+h.update(server_nonce);
+h.update(&(data.len() as u64).to_le_bytes());
+h.update(data);
+let seed: [u8; 32] = h.finalize().into();
+
+// Client: search by varying work_nonce
+let bits: u32 = 8;
+let (proof, hash) = equix_solve_with_bits(&seed, bits, 0)?;
+
+// Server: verify O(1)
+let vhash = equix_verify_solution(&seed, &proof)?;
+assert_eq!(hash, vhash);
+assert!(equix_check_bits(&seed, &proof, bits)?);
+```
+
+Notes:
+- Recommended seed: `SHA256("rspow:equix:v1|" || encode(server_nonce) || encode(data))`. Then build `challenge = seed || LE(work_nonce)` per attempt.
+- Submit `{ server_nonce, work_nonce, solution_bytes }`. The server rebuilds `seed` and verifies via `equix_verify_solution` and `equix_check_bits`.
+- To increase pressure under attack, require `m` independent proofs with distinct `work_nonce` values; each proof still verifies in O(1).
+
+## Examples and Benchmarks
+
+- Proof-carrying EquiX demo:
+  ```
+  cargo run --release --example equix_proof_demo -- --data hello --server-nonce sn --bits 1 --start 0
+  ```
+
+- General PoW benchmark (select algorithm and mode):
+  ```
+  cargo run --release --example pow_bench -- --algo sha2_256 --mode bits --difficulty 12 --repeats 3 --data hello
+  cargo run --release --example pow_bench -- --algo scrypt --mode ascii --difficulty 2 --scrypt-logn 10 --scrypt-r 8 --scrypt-p 1
+  cargo run --release --example pow_bench -- --algo argon2id --mode bits --difficulty 8 --argon2-m-kib 65536 --argon2-t 3 --argon2-p 1
+  cargo run --release --example pow_bench -- --algo equix --mode bits --difficulty 1 --server-nonce sn --start-work-nonce 0
+  ```
+
+- CSV columns: `kind,algo,mode,difficulty,data_len,run_idx,time_ms,tries,nonce_or_work,hash_hex`.
+
+
 ### Argon2id with custom parameters
 
 ```rust
