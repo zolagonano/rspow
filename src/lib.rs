@@ -3,6 +3,7 @@
 //! Supported algorithms:
 //! - SHA-256, SHA-512, RIPEMD-320
 //! - Scrypt, Argon2id (with custom `Params`)
+//! - EquiX (Tor's Equi‑X client puzzle; we hash the solution bytes with `sha256`)
 //!
 //! Difficulty modes:
 //! - `AsciiZeroPrefix` (default): hash must start with `difficulty` bytes of ASCII '0' (0x30).
@@ -32,6 +33,8 @@ use argon2::{Algorithm, Argon2, Version};
 use ripemd::Ripemd320;
 use serde::{ser::SerializeStruct, Deserialize, Serialize};
 use sha2::{Digest, Sha256, Sha512};
+// EquiX solver
+use equix as equix_crate;
 
 pub use argon2::Params as Argon2Params;
 pub use scrypt::Params as ScryptParams;
@@ -422,6 +425,12 @@ pub enum PoWAlgorithm {
     RIPEMD_320,
     Scrypt(ScryptParams),
     Argon2id(Argon2Params),
+    /// Equi‑X client puzzle: challenge is `data || nonce_le`.
+    /// If one or more solutions exist, take the lexicographically smallest
+    /// solution's bytes, hash with `sha256`, and use that as the output.
+    /// If there is no solution or construction fails, return 32 bytes of 0xFF
+    /// (ensures difficulty check fails).
+    EquiX,
 }
 
 impl PoWAlgorithm {
@@ -480,6 +489,48 @@ impl PoWAlgorithm {
         output
     }
 
+    /// Calculates EquiX-based pseudo-hash with given data and nonce.
+    ///
+    /// Rule: challenge = `data || nonce.to_le_bytes()`. Run EquiX.
+    /// If solutions exist, choose the lexicographically smallest 16‑byte
+    /// solution and return `sha256(solution_bytes)`; otherwise or on error,
+    /// return 32 bytes of `0xFF`.
+    pub fn calculate_equix(data: &[u8], nonce: usize) -> Vec<u8> {
+        // Build challenge: data || nonce (little‑endian)
+        let mut challenge = Vec::with_capacity(data.len() + std::mem::size_of::<usize>());
+        challenge.extend_from_slice(data);
+        challenge.extend_from_slice(&nonce.to_le_bytes());
+
+        // Instantiate EquiX and solve
+        let equix = match equix_crate::EquiX::new(&challenge) {
+            Ok(e) => e,
+            Err(_) => return vec![0xFFu8; 32],
+        };
+        let solutions = equix.solve();
+        if solutions.is_empty() {
+            return vec![0xFFu8; 32];
+        }
+
+        // Pick lexicographically smallest solution bytes
+        let mut best: Option<Vec<u8>> = None;
+        for sol in solutions.iter() {
+            let bytes = sol.to_bytes(); // fixed 16 bytes
+            match &mut best {
+                None => best = Some(bytes.to_vec()),
+                Some(prev) => {
+                    if bytes.as_slice() < prev.as_slice() {
+                        *prev = bytes.to_vec();
+                    }
+                }
+            }
+        }
+
+        let best_bytes = best.expect("solutions not empty");
+        let mut hasher = Sha256::new();
+        hasher.update(&best_bytes);
+        hasher.finalize().to_vec()
+    }
+
     /// Calculates hash based on the selected algorithm.
     pub fn calculate(&self, data: &[u8], nonce: usize) -> Vec<u8> {
         match self {
@@ -488,6 +539,7 @@ impl PoWAlgorithm {
             Self::RIPEMD_320 => Self::calculate_ripemd_320(data, nonce),
             Self::Scrypt(params) => Self::calculate_scrypt(data, nonce, params),
             Self::Argon2id(params) => Self::calculate_argon2id(data, nonce, params),
+            Self::EquiX => Self::calculate_equix(data, nonce),
         }
     }
 }
@@ -579,6 +631,7 @@ impl PartialEq for PoWAlgorithm {
             (Argon2id(a), Argon2id(b)) => {
                 a.m_cost() == b.m_cost() && a.t_cost() == b.t_cost() && a.p_cost() == b.p_cost()
             }
+            (EquiX, EquiX) => true,
             _ => false,
         }
     }
@@ -603,6 +656,7 @@ impl std::hash::Hash for PoWAlgorithm {
                 p.t_cost().hash(state);
                 p.p_cost().hash(state);
             }
+            EquiX => 5u8.hash(state),
         }
     }
 }
@@ -669,6 +723,7 @@ impl Serialize for PoWAlgorithm {
             Sha2_256 => serializer.serialize_str("Sha2_256"),
             Sha2_512 => serializer.serialize_str("Sha2_512"),
             RIPEMD_320 => serializer.serialize_str("RIPEMD_320"),
+            EquiX => serializer.serialize_str("EquiX"),
             Scrypt(p) => {
                 #[derive(Serialize)]
                 struct ScryptParamsSer {
@@ -728,9 +783,17 @@ impl<'de> Deserialize<'de> for PoWAlgorithm {
                     "Sha2_256" => Ok(PoWAlgorithm::Sha2_256),
                     "Sha2_512" => Ok(PoWAlgorithm::Sha2_512),
                     "RIPEMD_320" => Ok(PoWAlgorithm::RIPEMD_320),
+                    "EquiX" => Ok(PoWAlgorithm::EquiX),
                     _ => Err(E::unknown_variant(
                         v,
-                        &["Sha2_256", "Sha2_512", "RIPEMD_320", "Scrypt", "Argon2id"],
+                        &[
+                            "Sha2_256",
+                            "Sha2_512",
+                            "RIPEMD_320",
+                            "Scrypt",
+                            "Argon2id",
+                            "EquiX",
+                        ],
                     )),
                 }
             }
@@ -1016,10 +1079,10 @@ mod tests {
         assert!(pow.verify_pow(&[], (hash, nonce)));
     }
 
-    // -------- 按比特前缀判定工具函数测试 --------
+    // -------- Leading‑zero‑bits helper tests --------
     #[test]
     fn test_meets_leading_zero_bits_basic() {
-        // 0x00 0x00 0xFF -> 前 16 比特均为 0，第 17 比特为 1
+        // 0x00 0x00 0xFF -> first 16 bits are 0; the 17th bit is 1
         let h = [0x00u8, 0x00u8, 0xFFu8];
         assert!(meets_leading_zero_bits(&h, 0));
         assert!(meets_leading_zero_bits(&h, 1));
@@ -1033,27 +1096,27 @@ mod tests {
 
     #[test]
     fn test_meets_leading_zero_bits_edges() {
-        // 最高位为 1：0x80 -> 1000_0000
+        // MSB is 1: 0x80 -> 1000_0000
         let h1 = [0x80u8, 0x00u8];
         assert!(!meets_leading_zero_bits(&h1, 1));
 
-        // 0x7F -> 0111_1111，前导零仅 1 位
+        // 0x7F -> 0111_1111, has only 1 leading zero bit
         let h2 = [0x7Fu8, 0xFFu8];
         assert!(meets_leading_zero_bits(&h2, 1));
         assert!(!meets_leading_zero_bits(&h2, 2));
 
-        // 0x00 0x80：前 8 位为 0，第 9 位为 1
+        // 0x00 0x80: first 8 bits are zero; the 9th is 1
         let h3 = [0x00u8, 0x80u8];
         assert!(meets_leading_zero_bits(&h3, 8));
         assert!(!meets_leading_zero_bits(&h3, 9));
 
-        // 长度不足：bits 超出可用位数
+        // Out of range: bits exceed available bit length
         let h4 = [0x00u8, 0x00u8, 0x00u8];
         assert!(meets_leading_zero_bits(&h4, 24));
         assert!(!meets_leading_zero_bits(&h4, 25));
     }
 
-    // -------- 新增：serde/eq/hash 回归测试 --------
+    // -------- Serde/Eq/Hash regression tests --------
     #[test]
     fn serde_roundtrip_powalgorithm_variants() {
         let a1 = PoWAlgorithm::Sha2_256;
@@ -1070,6 +1133,11 @@ mod tests {
         let s3 = to_string(&a3).unwrap();
         let b3: PoWAlgorithm = from_str(&s3).unwrap();
         assert_eq!(a3, b3);
+
+        let a4 = PoWAlgorithm::EquiX;
+        let s4 = to_string(&a4).unwrap();
+        let b4: PoWAlgorithm = from_str(&s4).unwrap();
+        assert_eq!(a4, b4);
     }
 
     #[test]
@@ -1097,5 +1165,34 @@ mod tests {
         let mut hs2 = HashSet::new();
         hs2.insert(algo.clone());
         assert!(hs2.contains(&algo));
+    }
+
+    // -------- EquiX basic integration tests --------
+    #[test]
+    fn test_pow_algorithm_equix_calculate_deterministic() {
+        let data = b"hello world";
+        let nonce = 42usize;
+        let h1 = PoWAlgorithm::calculate_equix(data, nonce);
+        let h2 = PoWAlgorithm::calculate_equix(data, nonce);
+        assert_eq!(h1, h2);
+        assert_eq!(h1.len(), 32);
+    }
+
+    #[test]
+    fn test_pow_equix_bits_zero_trivial() {
+        // bits=0 should pass immediately at nonce=0 (verification also succeeds),
+        // providing a fast regression without heavy computation.
+        let data = "hello equix";
+        let pow = PoW::with_mode(
+            data,
+            0,
+            PoWAlgorithm::EquiX,
+            DifficultyMode::LeadingZeroBits,
+        )
+        .unwrap();
+        let (hash, nonce) = pow.calculate_pow(&[]);
+        assert_eq!(nonce, 0);
+        assert_eq!(hash.len(), 32);
+        assert!(pow.verify_pow(&[], (hash, nonce)));
     }
 }

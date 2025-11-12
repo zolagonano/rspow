@@ -14,6 +14,7 @@ A simple multi-algorithm proof-of-work library for Rust.
 - [x] RIPEMD-320
 - [x] Scrypt
 - [x] Argon2id
+- [x] EquiX (Tor's Equi‑X puzzle; hash = sha256(solution-bytes))
 
 API references are available at [docs.rs/rspow](https://docs.rs/rspow).
 
@@ -63,6 +64,20 @@ let pow = PoW::with_mode(data, bits, algorithm, DifficultyMode::LeadingZeroBits)
 let (hash, nonce) = pow.calculate_pow(&[]); // target is ignored in bits mode
 assert!(rspow::meets_leading_zero_bits(&hash, bits as u32));
 assert!(pow.verify_pow(&[], (hash, nonce)));
+```
+
+### EquiX (Tor Equi‑X puzzle)
+
+```rust
+use rspow::{PoW, PoWAlgorithm, DifficultyMode};
+
+let data = b"hello world";
+let bits = 1; // expected attempts ≈ 2^bits; EquiX solver may yield 0+ solutions per challenge
+let pow = PoW::with_mode(data, bits, PoWAlgorithm::EquiX, DifficultyMode::LeadingZeroBits).unwrap();
+
+// For demonstrations/tests you can also use bits=0 to avoid long loops
+let (hash, nonce) = pow.calculate_pow(&[]);
+assert!(hash.len() == 32);
 ```
 
 ### Argon2id with custom parameters
