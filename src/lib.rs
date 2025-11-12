@@ -502,6 +502,206 @@ pub fn equix_solve_with_bits(
     }
 }
 
+/// Parallel EquiX solve: collect up to `hits` proofs using `threads` workers, varying `work_nonce`.
+#[allow(clippy::type_complexity)]
+pub fn equix_solve_parallel_hits(
+    seed: &[u8],
+    bits: u32,
+    hits: usize,
+    threads: usize,
+    start_work_nonce: u64,
+) -> Result<Vec<(EquixProof, [u8; 32])>, String> {
+    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::thread;
+
+    if threads == 0 || hits == 0 {
+        return Err("threads and hits must be >= 1".to_owned());
+    }
+    let seed = seed.to_vec();
+    let next_wn = Arc::new(AtomicU64::new(start_work_nonce));
+    let found = Arc::new(AtomicUsize::new(0));
+    let stop = Arc::new(AtomicBool::new(false));
+    let out: Arc<Mutex<Vec<(EquixProof, [u8; 32])>>> =
+        Arc::new(Mutex::new(Vec::with_capacity(hits)));
+
+    let mut joins = Vec::with_capacity(threads);
+    for _ in 0..threads {
+        let seed_t = seed.clone();
+        let next_t = next_wn.clone();
+        let found_t = found.clone();
+        let stop_t = stop.clone();
+        let out_t = out.clone();
+        let j = thread::spawn(move || {
+            loop {
+                if stop_t.load(Ordering::Relaxed) {
+                    break;
+                }
+                let wn = next_t.fetch_add(1, Ordering::Relaxed);
+                let challenge = equix_challenge(&seed_t, wn);
+                let eq = match equix_crate::EquiX::new(&challenge) {
+                    Ok(e) => e,
+                    Err(_) => continue,
+                };
+                let sols = eq.solve();
+                for sol in sols.iter() {
+                    let bytes = sol.to_bytes();
+                    let mut hasher = Sha256::new();
+                    hasher.update(bytes);
+                    let hash: [u8; 32] = hasher.finalize().into();
+                    if meets_leading_zero_bits(&hash, bits) {
+                        let proof = EquixProof {
+                            work_nonce: wn,
+                            solution: EquixSolution(bytes),
+                        };
+                        if let Ok(mut v) = out_t.lock() {
+                            if v.len() < hits {
+                                v.push((proof, hash));
+                                let f = found_t.fetch_add(1, Ordering::SeqCst) + 1;
+                                if f >= hits {
+                                    stop_t.store(true, Ordering::SeqCst);
+                                }
+                            }
+                        }
+                        break; // next work_nonce
+                    }
+                }
+            }
+        });
+        joins.push(j);
+    }
+    for j in joins {
+        let _ = j.join();
+    }
+    let out = out
+        .lock()
+        .map(|v| v.clone())
+        .map_err(|_| "poison".to_owned())?;
+    Ok(out)
+}
+
+/// Derive replay tags from a base tag to avoid storing multiple keys server-side.
+/// If your server has a secret, prefer HMAC(base, idx) at the application layer.
+pub fn derive_replay_tags(base_tag: &[u8; 32], count: usize) -> Vec<[u8; 32]> {
+    let mut v = Vec::with_capacity(count);
+    for i in 1..=count {
+        let mut h = Sha256::new();
+        h.update(b"rspow:replay:v1|");
+        h.update(base_tag);
+        h.update((i as u64).to_le_bytes());
+        v.push(h.finalize().into());
+    }
+    v
+}
+
+// ===== Generic parallel PoW (multi-hit) =====
+
+/// A single PoW hit found by the parallel solver.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct PowHit {
+    pub nonce: u64,
+    pub hash: [u8; 32],
+}
+
+/// Configuration for the parallel PoW solver.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ParPowCfg {
+    pub threads: usize,
+    pub hits: usize,
+    pub start_nonce: u64,
+}
+
+impl ParPowCfg {
+    /// Build a configuration with default threads = max(1, num_cpus-1), hits=1, start_nonce=0.
+    pub fn default_with_hits(hits: usize) -> Self {
+        let p = std::thread::available_parallelism()
+            .map(|nz| nz.get())
+            .unwrap_or(1)
+            .saturating_sub(1)
+            .max(1);
+        ParPowCfg {
+            threads: p,
+            hits,
+            start_nonce: 0,
+        }
+    }
+}
+
+/// Solve a PoW in parallel and collect up to `cfg.hits` distinct nonces that satisfy the difficulty.
+/// Works with any `PoWAlgorithm` and both difficulty modes.
+pub fn pow_solve_parallel_hits(pow: &PoW, cfg: &ParPowCfg) -> Result<Vec<PowHit>, String> {
+    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::thread;
+
+    if cfg.threads == 0 || cfg.hits == 0 {
+        return Err("threads and hits must be >= 1".to_owned());
+    }
+
+    let pow = pow.clone();
+    let target_ascii = match pow.mode {
+        DifficultyMode::AsciiZeroPrefix => Some(pow.calculate_target()),
+        DifficultyMode::LeadingZeroBits => None,
+    };
+    let next_nonce = Arc::new(AtomicU64::new(cfg.start_nonce));
+    let found = Arc::new(AtomicUsize::new(0));
+    let stop = Arc::new(AtomicBool::new(false));
+    let hits: Arc<Mutex<Vec<PowHit>>> = Arc::new(Mutex::new(Vec::with_capacity(cfg.hits)));
+
+    let mut joins = Vec::with_capacity(cfg.threads);
+    for _ in 0..cfg.threads {
+        let pow_t = pow.clone();
+        let target_t = target_ascii.clone();
+        let next = next_nonce.clone();
+        let found_t = found.clone();
+        let stop_t = stop.clone();
+        let hits_t = hits.clone();
+        let hits_cap = cfg.hits;
+        let j = thread::spawn(move || loop {
+            if stop_t.load(Ordering::Relaxed) {
+                break;
+            }
+            let n = next.fetch_add(1, Ordering::Relaxed) as usize;
+            let hash_vec = pow_t.algorithm.calculate(&pow_t.data, n);
+            let ok = match pow_t.mode {
+                DifficultyMode::AsciiZeroPrefix => {
+                    let t = target_t.as_ref().expect("ascii target exists");
+                    hash_vec.starts_with(t)
+                }
+                DifficultyMode::LeadingZeroBits => {
+                    meets_leading_zero_bits(&hash_vec, pow_t.difficulty as u32)
+                }
+            };
+            if ok {
+                let mut h32 = [0u8; 32];
+                h32.copy_from_slice(&hash_vec[..32.min(hash_vec.len())]);
+                if let Ok(mut v) = hits_t.lock() {
+                    if v.len() < hits_cap {
+                        v.push(PowHit {
+                            nonce: n as u64,
+                            hash: h32,
+                        });
+                        let f = found_t.fetch_add(1, Ordering::SeqCst) + 1;
+                        if f >= hits_cap {
+                            stop_t.store(true, Ordering::SeqCst);
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+        joins.push(j);
+    }
+    for j in joins {
+        let _ = j.join();
+    }
+    let out = hits
+        .lock()
+        .map(|v| v.clone())
+        .map_err(|_| "poison".to_owned())?;
+    Ok(out)
+}
+
 /// Enum defining different Proof of Work (PoW) algorithms.
 #[allow(non_camel_case_types)]
 #[derive(Clone, Debug)]

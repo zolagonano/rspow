@@ -255,3 +255,14 @@ To use KPoW with true threads in the browser (std::thread over Web Workers):
 
 - Existing code using `PoW::new` and `calculate_target()` keeps the legacy behavior by default.
 - New code is encouraged to adopt `DifficultyMode::LeadingZeroBits` for precise difficulty control.
+
+### Parallel client PoW (latency/throughput trade-off)
+
+The `parallel_bench` example explores per-device scale-up by varying threads (default `nproc-1`) and measuring both time-to-first-hit and time-to-H-hits:
+
+```
+cargo run --release --example parallel_bench -- --algo equix --mode bits --difficulty 1 --hits 8 --threads 8
+cargo run --release --example parallel_bench -- --algo sha2_256 --mode bits --difficulty 12 --hits 16
+```
+
+Output shows `first_time_ms`, `total_time_ms` and `throughput_hits_per_s`. Increasing parallelism often raises the latency of a single task slightly (contention, scheduling) yet raises total throughput substantially.
