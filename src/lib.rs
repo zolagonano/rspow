@@ -431,6 +431,34 @@ pub struct EquixProof {
     pub solution: EquixSolution,
 }
 
+/// A bundle of EquiX proofs along with a base tag for replay protection.
+/// Server can store only the `base_tag`; the remaining tags can be derived deterministically.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct EquixProofBundle {
+    pub base_tag: [u8; 32],
+    pub proofs: Vec<EquixProof>,
+}
+
+impl EquixProofBundle {
+    /// Verify all proofs against the provided seed and difficulty.
+    pub fn verify_all(&self, seed: &[u8], bits: u32) -> Result<Vec<bool>, String> {
+        let mut out = Vec::with_capacity(self.proofs.len());
+        for p in &self.proofs {
+            let ok = equix_check_bits(seed, p, bits)?;
+            out.push(ok);
+        }
+        Ok(out)
+    }
+
+    /// Derived tags for proofs[1..]; server can avoid storing multiple keys.
+    pub fn derived_tags(&self) -> Vec<[u8; 32]> {
+        if self.proofs.len() <= 1 {
+            return Vec::new();
+        }
+        derive_replay_tags(&self.base_tag, self.proofs.len() - 1)
+    }
+}
+
 /// Build EquiX challenge bytes from an application‑defined seed and a `work_nonce`.
 ///
 /// Recommendation: let `seed = SHA256("rspow:equix:v1|" || encode(server_nonce) || encode(data))`.

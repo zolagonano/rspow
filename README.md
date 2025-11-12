@@ -262,6 +262,7 @@ The `parallel_bench` example explores per-device scale-up by varying threads (de
 
 ```
 cargo run --release --example parallel_bench -- --algo equix --mode bits --difficulty 1 --hits 8 --threads 8
+cargo run --release --example parallel_bench -- --algo equix --mode bits --difficulty 1 --hits 8 --threads-list 1,2,4,8
 cargo run --release --example parallel_bench -- --algo sha2_256 --mode bits --difficulty 12 --hits 16
 ```
 
