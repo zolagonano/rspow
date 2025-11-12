@@ -312,3 +312,20 @@ cargo run --release --example parallel_bench -- --algo sha2_256 --mode bits --di
 ```
 
 Output shows `first_time_ms`, `total_time_ms` and `throughput_hits_per_s`. Increasing parallelism often raises the latency of a single task slightly (contention, scheduling) yet raises total throughput substantially.
+
+CSV layout (stdout; use `| tee file.csv` to save):
+
+- Per-run rows (one per repeat per threads value):
+  - Header: `kind,algo,mode,bits_or_len,hits,threads,repeat_idx,first_time_ms,total_time_ms,throughput_hits_per_s`.
+  - Semantics:
+    - `first_time_ms`: time to the first successful proof with the given parallelism.
+    - `total_time_ms`: time to collect `hits` proofs (wall time).
+    - `throughput_hits_per_s`: `hits / (total_time_ms/1000)`.
+- Per-threads summary row (one per threads value, preceded by its own header):
+  - Header: `kind,algo,mode,bits_or_len,hits,threads,mean_first_ms,std_first_ms,stderr_first_ms,ci95_low_first_ms,ci95_high_first_ms,mean_total_ms,std_total_ms,stderr_total_ms,ci95_low_total_ms,ci95_high_total_ms,mean_throughput,std_throughput,stderr_throughput,ci95_low_throughput,ci95_high_throughput`.
+  - These are computed over `--repeats` samples at the same `threads`.
+
+Tips for more stable measurements:
+- Use `--repeats 5` (or higher) for each threads value.
+- Keep the system thermals and CPU scaling steady; avoid heavy background load.
+- Expect some increase in `first_time_ms` when threads grow, while `throughput_hits_per_s` typically improves.

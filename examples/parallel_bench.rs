@@ -111,8 +111,11 @@ fn main() -> Result<(), String> {
         let mut thrpt: Vec<f64> = Vec::with_capacity(repeats as usize);
 
         for rep in 0..repeats {
-        let mode_str = match mode { Mode::Ascii => "ascii", Mode::Bits => "bits" };
-        match algo.as_str() {
+            let mode_str = match mode {
+                Mode::Ascii => "ascii",
+                Mode::Bits => "bits",
+            };
+            match algo.as_str() {
                 "equix" => {
                     if !matches!(mode, Mode::Bits) {
                         return Err("equix only supports bits mode".into());
@@ -141,12 +144,12 @@ fn main() -> Result<(), String> {
                     let t_all = Instant::now();
                     let all = equix_solve_parallel_hits(&seed, bits, hits, th, start)?;
                     let dt_all = t_all.elapsed().as_millis();
-                let tp = (hits as f64) / ((dt_all as f64) / 1000.0);
-                let tp_s = format!("{:.6}", tp);
-                println!(
-                    "run,{},{},{},{},{},{},{},{},{}",
-                    algo, mode_str, difficulty, hits, th, rep, dt_first, dt_all, tp_s
-                );
+                    let tp = (hits as f64) / ((dt_all as f64) / 1000.0);
+                    let tp_s = format!("{:.6}", tp);
+                    println!(
+                        "run,{},{},{},{},{},{},{},{},{}",
+                        algo, mode_str, difficulty, hits, th, rep, dt_first, dt_all, tp_s
+                    );
                     first_ms.push(dt_first);
                     total_ms.push(dt_all);
                     thrpt.push(tp);
@@ -200,12 +203,12 @@ fn main() -> Result<(), String> {
                         },
                     )?;
                     let dt_all = t_all.elapsed().as_millis();
-                let tp = (hits as f64) / ((dt_all as f64) / 1000.0);
-                let tp_s = format!("{:.6}", tp);
-                println!(
-                    "run,{},{},{},{},{},{},{},{},{}",
-                    algo, mode_str, difficulty, hits, th, rep, dt_first, dt_all, tp_s
-                );
+                    let tp = (hits as f64) / ((dt_all as f64) / 1000.0);
+                    let tp_s = format!("{:.6}", tp);
+                    println!(
+                        "run,{},{},{},{},{},{},{},{},{}",
+                        algo, mode_str, difficulty, hits, th, rep, dt_first, dt_all, tp_s
+                    );
                     first_ms.push(dt_first);
                     total_ms.push(dt_all);
                     thrpt.push(tp);
@@ -238,14 +241,33 @@ fn main() -> Result<(), String> {
         let (mf, sf, sef, cf_l, cf_h) = summarize_u128(&first_ms);
         let (mt, st, set, ct_l, ct_h) = summarize_u128(&total_ms);
         let (mp, sp, sep, cp_l, cp_h) = summarize_f64(&thrpt);
-        let mode_str = match mode { Mode::Ascii => "ascii", Mode::Bits => "bits" };
+        let mode_str = match mode {
+            Mode::Ascii => "ascii",
+            Mode::Bits => "bits",
+        };
         println!("kind,algo,mode,bits_or_len,hits,threads,mean_first_ms,std_first_ms,stderr_first_ms,ci95_low_first_ms,ci95_high_first_ms,mean_total_ms,std_total_ms,stderr_total_ms,ci95_low_total_ms,ci95_high_total_ms,mean_throughput,std_throughput,stderr_throughput,ci95_low_throughput,ci95_high_throughput");
         println!(
             "summary,{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
-            algo, mode_str, difficulty, hits, th,
-            format!("{:.6}", mf), format!("{:.6}", sf), format!("{:.6}", sef), format!("{:.6}", cf_l), format!("{:.6}", cf_h),
-            format!("{:.6}", mt), format!("{:.6}", st), format!("{:.6}", set), format!("{:.6}", ct_l), format!("{:.6}", ct_h),
-            format!("{:.6}", mp), format!("{:.6}", sp), format!("{:.6}", sep), format!("{:.6}", cp_l), format!("{:.6}", cp_h)
+            algo,
+            mode_str,
+            difficulty,
+            hits,
+            th,
+            format!("{:.6}", mf),
+            format!("{:.6}", sf),
+            format!("{:.6}", sef),
+            format!("{:.6}", cf_l),
+            format!("{:.6}", cf_h),
+            format!("{:.6}", mt),
+            format!("{:.6}", st),
+            format!("{:.6}", set),
+            format!("{:.6}", ct_l),
+            format!("{:.6}", ct_h),
+            format!("{:.6}", mp),
+            format!("{:.6}", sp),
+            format!("{:.6}", sep),
+            format!("{:.6}", cp_l),
+            format!("{:.6}", cp_h)
         );
     }
     Ok(())
