@@ -1,9 +1,6 @@
 use hex::encode as hex_encode;
-use ripemd::Ripemd320;
-use rspow::{
-    equix_challenge, meets_leading_zero_bits, EquixSolution, PoW, PoWAlgorithm, ScryptParams,
-};
-use sha2::{Digest, Sha256, Sha512};
+use rspow::{equix_challenge, meets_leading_zero_bits, PoW, PoWAlgorithm, ScryptParams};
+use sha2::{Digest, Sha256};
 use std::str::FromStr;
 use std::time::Instant;
 
@@ -34,7 +31,7 @@ fn main() -> Result<(), String> {
     let mut algo = String::from("sha2_256");
     let mut mode = Mode::Bits;
     let mut difficulty: usize = 10;
-    let mut repeats: u32 = 3;
+    let mut repeats: u32 = 300;
     let mut data = String::from("hello");
     let mut s_log_n: u8 = 10;
     let mut s_r: u32 = 8;
@@ -75,6 +72,9 @@ fn main() -> Result<(), String> {
 
     println!("kind,algo,mode,difficulty,data_len,run_idx,time_ms,tries,nonce_or_work,hash_hex");
 
+    let mut times: Vec<u128> = Vec::with_capacity(repeats as usize);
+    let mut tries_all: Vec<u128> = Vec::with_capacity(repeats as usize);
+
     for run_idx in 0..repeats {
         match algo.as_str() {
             "sha2_256" | "sha2_512" | "ripemd_320" | "scrypt" | "argon2id" => {
@@ -112,13 +112,14 @@ fn main() -> Result<(), String> {
                 let (hash, nonce) = pow.calculate_pow(&target);
                 let dt_ms = t0.elapsed().as_millis();
                 let tries = (nonce as u128) + 1;
+                let mode_str = match mode {
+                    Mode::Ascii => "ascii",
+                    Mode::Bits => "leading_zero_bits",
+                };
                 println!(
                     "run,{},{},{},{},{},{},{},{},{}",
                     algo,
-                    match mode {
-                        Mode::Ascii => "ascii",
-                        Mode::Bits => "leading_zero_bits",
-                    },
+                    mode_str,
                     difficulty,
                     data.len(),
                     run_idx,
@@ -127,6 +128,8 @@ fn main() -> Result<(), String> {
                     nonce,
                     hex_encode(hash)
                 );
+                times.push(dt_ms);
+                tries_all.push(tries);
             }
             "equix" => {
                 // Seed: either supplied, or domain-separated hash of (server_nonce, data, run_idx)
@@ -155,7 +158,8 @@ fn main() -> Result<(), String> {
                 let bits = difficulty as u32;
                 let mut work = start_work_nonce;
                 let t0 = Instant::now();
-                let (mut found_hash_hex, mut found_work) = (String::new(), 0u64);
+                let mut found_hash_hex: Option<String> = None;
+                let mut found_work: Option<u64> = None;
                 let mut tries = 0u128;
                 'outer: loop {
                     let challenge = equix_challenge(&seed, work);
@@ -174,8 +178,8 @@ fn main() -> Result<(), String> {
                         hasher.update(bytes);
                         let hash: [u8; 32] = hasher.finalize().into();
                         if meets_leading_zero_bits(&hash, bits) {
-                            found_hash_hex = hex_encode(hash);
-                            found_work = work;
+                            found_hash_hex = Some(hex_encode(hash));
+                            found_work = Some(work);
                             break 'outer;
                         }
                     }
@@ -192,12 +196,62 @@ fn main() -> Result<(), String> {
                     run_idx,
                     dt_ms,
                     tries,
-                    found_work,
-                    found_hash_hex
+                    found_work.expect("work"),
+                    found_hash_hex.expect("hash")
                 );
+                times.push(dt_ms);
+                tries_all.push(tries);
             }
             _ => return Err(usage()),
         }
+    }
+
+    // Summary statistics (separate header for clarity)
+    if !times.is_empty() {
+        fn summarize(xs: &[u128]) -> (f64, f64, f64, f64, f64) {
+            let n = xs.len() as f64;
+            let sum: f64 = xs.iter().map(|&v| v as f64).sum();
+            let mean = sum / n;
+            let sumsq: f64 = xs.iter().map(|&v| (v as f64) * (v as f64)).sum();
+            let var = if xs.len() > 1 {
+                (sumsq - sum * sum / n) / (n - 1.0)
+            } else {
+                0.0
+            };
+            let std = var.max(0.0).sqrt();
+            let stderr = if n > 0.0 { std / n.sqrt() } else { 0.0 };
+            (
+                mean,
+                std,
+                stderr,
+                mean - 1.959963984540054 * stderr,
+                mean + 1.959963984540054 * stderr,
+            )
+        }
+        let (mt, st, stet, ci95l_t, ci95h_t) = summarize(&times);
+        let (mtr, stry, sterr_tr, ci95l_tr, ci95h_tr) = summarize(&tries_all);
+        let mode_str = match mode {
+            Mode::Ascii => "ascii",
+            Mode::Bits => "leading_zero_bits",
+        };
+        println!("kind,algo,mode,difficulty,data_len,mean_time_ms,std_time_ms,stderr_time_ms,ci95_low_time_ms,ci95_high_time_ms,mean_tries,std_tries,stderr_tries,ci95_low_tries,ci95_high_tries");
+        println!(
+            "summary,{},{},{},{},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6}",
+            algo,
+            mode_str,
+            difficulty,
+            data.len(),
+            mt,
+            st,
+            stet,
+            ci95l_t,
+            ci95h_t,
+            mtr,
+            stry,
+            sterr_tr,
+            ci95l_tr,
+            ci95h_tr
+        );
     }
 
     Ok(())

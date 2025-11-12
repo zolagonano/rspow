@@ -123,13 +123,18 @@ Notes:
 
 - General PoW benchmark (select algorithm and mode):
   ```
-  cargo run --release --example pow_bench -- --algo sha2_256 --mode bits --difficulty 12 --repeats 3 --data hello
+  # Default repeats is 300 to reduce measurement noise.
+  cargo run --release --example pow_bench -- --algo sha2_256 --mode bits --difficulty 12 --data hello
   cargo run --release --example pow_bench -- --algo scrypt --mode ascii --difficulty 2 --scrypt-logn 10 --scrypt-r 8 --scrypt-p 1
   cargo run --release --example pow_bench -- --algo argon2id --mode bits --difficulty 8 --argon2-m-kib 65536 --argon2-t 3 --argon2-p 1
   cargo run --release --example pow_bench -- --algo equix --mode bits --difficulty 1 --server-nonce sn --start-work-nonce 0
   ```
 
-- CSV columns: `kind,algo,mode,difficulty,data_len,run_idx,time_ms,tries,nonce_or_work,hash_hex`.
+- CSV columns:
+  - Per-run rows: `kind,algo,mode,difficulty,data_len,run_idx,time_ms,tries,nonce_or_work,hash_hex`.
+    - For EquiX, `tries` equals the number of challenges (work_nonce values) attempted per found solution — this directly measures “attempts per solution”.
+  - Summary row (appended at the end with its own header):
+    `kind,algo,mode,difficulty,data_len,mean_time_ms,std_time_ms,stderr_time_ms,ci95_low_time_ms,ci95_high_time_ms,mean_tries,std_tries,stderr_tries,ci95_low_tries,ci95_high_tries`.
 
 
 ### Argon2id with custom parameters

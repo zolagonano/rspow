@@ -1,7 +1,5 @@
 use hex::encode as hex_encode;
-use rspow::{
-    equix_check_bits, equix_solve_with_bits, equix_verify_solution, EquixProof, EquixSolution,
-};
+use rspow::{equix_check_bits, equix_solve_with_bits, equix_verify_solution};
 use sha2::{Digest, Sha256};
 use std::time::Instant;
 
