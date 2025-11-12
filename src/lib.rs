@@ -416,6 +416,92 @@ pub mod bench {
     }
 }
 
+// ===== EquiX proof-carrying (low‑cost verification) helpers =====
+
+/// 16‑byte EquiX solution (8×u16, LE) — stable wrapper for external use.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct EquixSolution(pub [u8; 16]);
+
+/// A proof for EquiX: includes `work_nonce` and the concrete solution bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct EquixProof {
+    /// Client‑selected search nonce; server replays it to rebuild the challenge.
+    pub work_nonce: u64,
+    /// Concrete EquiX solution bytes; verifier checks with `equix::verify_bytes`.
+    pub solution: EquixSolution,
+}
+
+/// Build EquiX challenge bytes from an application‑defined seed and a `work_nonce`.
+///
+/// Recommendation: let `seed = SHA256("rspow:equix:v1|" || encode(server_nonce) || encode(data))`.
+/// Then reuse `seed` across attempts and only vary `work_nonce` per try.
+pub fn equix_challenge(seed: &[u8], work_nonce: u64) -> Vec<u8> {
+    let mut ch = Vec::with_capacity(seed.len() + 8);
+    ch.extend_from_slice(seed);
+    ch.extend_from_slice(&work_nonce.to_le_bytes());
+    ch
+}
+
+/// Verify a single EquiX proof and return `sha256(solution_bytes)` if valid.
+///
+/// This is an O(1) verification path: it does not try to solve EquiX.
+pub fn equix_verify_solution(seed: &[u8], proof: &EquixProof) -> Result<[u8; 32], String> {
+    let challenge = equix_challenge(seed, proof.work_nonce);
+    equix_crate::verify_bytes(&challenge, &proof.solution.0).map_err(|e| e.to_string())?;
+    let mut hasher = Sha256::new();
+    hasher.update(proof.solution.0);
+    let h = hasher.finalize();
+    Ok(h.into())
+}
+
+/// Verify that the proof meets a leading‑zero‑bits difficulty.
+pub fn equix_check_bits(seed: &[u8], proof: &EquixProof, bits: u32) -> Result<bool, String> {
+    let hash = equix_verify_solution(seed, proof)?;
+    Ok(meets_leading_zero_bits(&hash, bits))
+}
+
+/// Solve EquiX by varying `work_nonce`, returning the first proof meeting `bits`.
+///
+/// This is the client‑side search routine. It skips challenges that construct/solve with
+/// zero solutions and continues with the next `work_nonce`.
+pub fn equix_solve_with_bits(
+    seed: &[u8],
+    bits: u32,
+    start_work_nonce: u64,
+) -> Result<(EquixProof, [u8; 32]), String> {
+    let mut work_nonce = start_work_nonce;
+    loop {
+        let challenge = equix_challenge(seed, work_nonce);
+        // Build EquiX; on rare constraint errors, skip to next work_nonce.
+        let equix = match equix_crate::EquiX::new(&challenge) {
+            Ok(e) => e,
+            Err(_) => {
+                work_nonce = work_nonce
+                    .checked_add(1)
+                    .ok_or_else(|| "work_nonce overflow".to_owned())?;
+                continue;
+            }
+        };
+        let solutions = equix.solve();
+        for sol in solutions.iter() {
+            let bytes = sol.to_bytes();
+            let mut hasher = Sha256::new();
+            hasher.update(bytes);
+            let hash: [u8; 32] = hasher.finalize().into();
+            if meets_leading_zero_bits(&hash, bits) {
+                let proof = EquixProof {
+                    work_nonce,
+                    solution: EquixSolution(bytes),
+                };
+                return Ok((proof, hash));
+            }
+        }
+        work_nonce = work_nonce
+            .checked_add(1)
+            .ok_or_else(|| "work_nonce overflow".to_owned())?;
+    }
+}
+
 /// Enum defining different Proof of Work (PoW) algorithms.
 #[allow(non_camel_case_types)]
 #[derive(Clone, Debug)]
@@ -1194,5 +1280,51 @@ mod tests {
         assert_eq!(nonce, 0);
         assert_eq!(hash.len(), 32);
         assert!(pow.verify_pow(&[], (hash, nonce)));
+    }
+
+    // -------- Proof-carrying EquiX tests (low-cost verification) --------
+    #[test]
+    fn test_equix_proof_roundtrip_bits0() {
+        // Derive a seed once; in production you should domain-separate and include server_nonce+data.
+        let mut seed_hasher = Sha256::new();
+        seed_hasher.update(b"seed-for-test");
+        let seed = seed_hasher.finalize();
+
+        // Solve for bits=0 starting from work_nonce=0.
+        let (proof, hash) = equix_solve_with_bits(&seed, 0, 0).expect("solve");
+        // Verify returns the same hash and meets bits=0 trivially.
+        let verified_hash = equix_verify_solution(&seed, &proof).expect("verify");
+        assert_eq!(hash, verified_hash);
+        assert!(equix_check_bits(&seed, &proof, 0).unwrap());
+    }
+
+    #[test]
+    fn test_equix_verify_with_manual_solution() {
+        // Build a challenge with small search window to find any solution.
+        let mut seed_hasher = Sha256::new();
+        seed_hasher.update(b"seed-for-test-2");
+        let seed = seed_hasher.finalize();
+
+        let mut found = None;
+        for wn in 0u64..64 {
+            let challenge = equix_challenge(&seed, wn);
+            if let Ok(eq) = equix_crate::EquiX::new(&challenge) {
+                let sols = eq.solve();
+                if let Some(sol) = sols.iter().next() {
+                    found = Some((wn, EquixSolution(sol.to_bytes())));
+                    break;
+                }
+            }
+        }
+        let (work_nonce, solution) = found.expect("at least one solution in small window");
+        let proof = EquixProof {
+            work_nonce,
+            solution,
+        };
+
+        let h = equix_verify_solution(&seed, &proof).expect("verify");
+        assert_eq!(h.len(), 32);
+        // bits=0 must pass; bits=1 may or may not pass — just check the trivial case.
+        assert!(equix_check_bits(&seed, &proof, 0).unwrap());
     }
 }
