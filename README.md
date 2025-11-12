@@ -114,6 +114,51 @@ Notes:
 - Submit `{ server_nonce, work_nonce, solution_bytes }`. The server rebuilds `seed` and verifies via `equix_verify_solution` and `equix_check_bits`.
 - To increase pressure under attack, require `m` independent proofs with distinct `work_nonce` values; each proof still verifies in O(1).
 
+### EquiX proof bundles (batch verify + storage‑efficient anti‑replay)
+
+For multiple concurrent proofs, bundle them so the server verifies all in O(1) per proof while storing only a single anti‑replay key:
+
+```rust
+use rspow::{EquixProofBundle, equix_solve_parallel_hits};
+use sha2::{Digest, Sha256};
+
+// Client derives seed once (domain-separated) and solves in parallel
+let seed = {
+    let mut h = Sha256::new();
+    h.update(b"rspow:equix:v1|");
+    h.update(&(server_nonce.len() as u64).to_le_bytes());
+    h.update(server_nonce);
+    h.update(&(data.len() as u64).to_le_bytes());
+    h.update(data);
+    h.finalize()
+};
+let results = equix_solve_parallel_hits(&seed, bits, hits, threads, 0)?; // Vec<(EquixProof, [u8;32])>
+
+// Base tag from the first proof (server stores only this); the rest are derived
+let (first, _) = &results[0];
+let base_tag: [u8;32] = {
+    let mut h = Sha256::new();
+    h.update(b"rspow:tag:v1|");
+    h.update(server_nonce); // include signed nonce
+    h.update(data);
+    h.update(first.work_nonce.to_le_bytes());
+    h.update(first.solution.0);
+    h.finalize().into()
+};
+
+let bundle = EquixProofBundle { base_tag, proofs: results.into_iter().map(|(p,_)| p).collect() };
+
+// Server: re-derive seed, verify all proofs in O(1), and derive follow-up tags to avoid multiple keys
+let oks = bundle.verify_all(&seed, bits)?; // all true
+let derived = bundle.derived_tags(); // tag[1..]
+```
+
+Example:
+
+```
+cargo run --release --example equix_bundle_demo -- --data hello --server-nonce sn --bits 1 --hits 4 --threads 8
+```
+
 ## Examples and Benchmarks
 
 - Proof-carrying EquiX demo:
