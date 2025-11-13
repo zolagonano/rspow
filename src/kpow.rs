@@ -27,12 +27,13 @@ compile_error!(
 );
 
 use crate::{meets_leading_zero_bits, Argon2Params, PoWAlgorithm};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::time::Instant;
 
 /// A single proof item sufficient for external verification.
 /// Verifier needs: (bits, params, seed, payload, index, nonce, hash) to recompute and check.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct KProof {
     pub index: usize,
     pub nonce: u64,
@@ -47,7 +48,7 @@ impl KProof {
 }
 
 /// Execution summary for a batch of k puzzles.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct KPowResult {
     pub total_time_ms: u128,
     pub total_tries: u64,
@@ -55,12 +56,111 @@ pub struct KPowResult {
 }
 
 /// KPoW configuration: bits, Argon2 params, worker pool size, seed and payload.
+#[derive(Clone, Debug)]
 pub struct KPow {
     pub bits: u32,
     pub params: Argon2Params,
     pub workers: usize,
     pub seed: [u8; 32],
     pub payload: Vec<u8>,
+}
+
+// Note: we intentionally implement Eq/PartialEq/Hash/Serde manually to avoid
+// exposing Argon2Params internals or relying on its trait support.
+impl PartialEq for KPow {
+    fn eq(&self, other: &Self) -> bool {
+        self.bits == other.bits
+            && self.workers == other.workers
+            && self.seed == other.seed
+            && self.payload == other.payload
+            && self.params.m_cost() == other.params.m_cost()
+            && self.params.t_cost() == other.params.t_cost()
+            && self.params.p_cost() == other.params.p_cost()
+    }
+}
+
+impl Eq for KPow {}
+
+impl std::hash::Hash for KPow {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.bits.hash(state);
+        self.workers.hash(state);
+        self.seed.hash(state);
+        self.payload.hash(state);
+        self.params.m_cost().hash(state);
+        self.params.t_cost().hash(state);
+        self.params.p_cost().hash(state);
+    }
+}
+
+impl Serialize for KPow {
+    /// Serialize as a stable, readable struct with Argon2 parameters expanded.
+    /// Fields: bits, workers, seed([u8;32]), payload(Vec<u8>), params{m_kib,t_cost,p_cost}.
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        #[derive(Serialize)]
+        struct ParamsSer {
+            m_kib: u32,
+            t_cost: u32,
+            p_cost: u32,
+        }
+        #[derive(Serialize)]
+        struct KPowSer<'a> {
+            bits: u32,
+            workers: usize,
+            seed: &'a [u8; 32],
+            payload: &'a [u8],
+            params: ParamsSer,
+        }
+        let params = ParamsSer {
+            m_kib: self.params.m_cost(),
+            t_cost: self.params.t_cost(),
+            p_cost: self.params.p_cost(),
+        };
+        let wrapper = KPowSer {
+            bits: self.bits,
+            workers: self.workers,
+            seed: &self.seed,
+            payload: &self.payload,
+            params,
+        };
+        wrapper.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for KPow {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct ParamsDe {
+            m_kib: u32,
+            t_cost: u32,
+            p_cost: u32,
+        }
+        #[derive(Deserialize)]
+        struct KPowDe {
+            bits: u32,
+            workers: usize,
+            seed: [u8; 32],
+            payload: Vec<u8>,
+            params: ParamsDe,
+        }
+        let raw = KPowDe::deserialize(deserializer)?;
+        let params =
+            Argon2Params::new(raw.params.m_kib, raw.params.t_cost, raw.params.p_cost, None)
+                .map_err(|e| serde::de::Error::custom(e.to_string()))?;
+        Ok(KPow {
+            bits: raw.bits,
+            params,
+            workers: raw.workers,
+            seed: raw.seed,
+            payload: raw.payload,
+        })
+    }
 }
 
 impl KPow {
@@ -359,5 +459,71 @@ mod wasm_threads_init {
         wasm_bindgen_rayon::init_thread_pool(workers)
             .await
             .map_err(|e| JsValue::from_str(&format!("init_thread_pool failed: {e}")))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::{from_str, to_string};
+    use std::collections::HashSet;
+
+    #[test]
+    fn serde_roundtrip_kproof_and_result() {
+        let p = KProof {
+            index: 3,
+            nonce: 42,
+            hash: [7u8; 32],
+        };
+        let s = to_string(&p).unwrap();
+        let back: KProof = from_str(&s).unwrap();
+        assert_eq!(p, back);
+
+        let r = KPowResult {
+            total_time_ms: 123,
+            total_tries: 456,
+            successes: 3,
+        };
+        let s2 = to_string(&r).unwrap();
+        let back2: KPowResult = from_str(&s2).unwrap();
+        assert_eq!(r, back2);
+    }
+
+    #[test]
+    fn eq_hash_kpow() {
+        let params = Argon2Params::new(16, 2, 1, None).unwrap();
+        let a = KPow {
+            bits: 8,
+            params: params.clone(),
+            workers: 2,
+            seed: [1u8; 32],
+            payload: vec![1, 2, 3],
+        };
+        let b = KPow {
+            bits: 8,
+            params: params.clone(),
+            workers: 2,
+            seed: [1u8; 32],
+            payload: vec![1, 2, 3],
+        };
+        assert_eq!(a, b);
+        let mut set = HashSet::new();
+        set.insert(a);
+        assert!(set.contains(&b));
+    }
+
+    #[test]
+    fn serde_roundtrip_kpow() {
+        let params = Argon2Params::new(32, 3, 2, None).unwrap();
+        let k = KPow {
+            bits: 10,
+            params,
+            workers: 4,
+            seed: [9u8; 32],
+            payload: vec![9, 9],
+        };
+        let s = to_string(&k).unwrap();
+        let back: KPow = from_str(&s).unwrap();
+        assert_eq!(k, back);
     }
 }

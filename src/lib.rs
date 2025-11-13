@@ -3,6 +3,7 @@
 //! Supported algorithms:
 //! - SHA-256, SHA-512, RIPEMD-320
 //! - Scrypt, Argon2id (with custom `Params`)
+//! - EquiX (Tor's Equi‑X client puzzle; we hash the solution bytes with `sha256`)
 //!
 //! Difficulty modes:
 //! - `AsciiZeroPrefix` (default): hash must start with `difficulty` bytes of ASCII '0' (0x30).
@@ -30,8 +31,10 @@
 //!
 use argon2::{Algorithm, Argon2, Version};
 use ripemd::Ripemd320;
-use serde::Serialize;
+use serde::{ser::SerializeStruct, Deserialize, Serialize};
 use sha2::{Digest, Sha256, Sha512};
+// EquiX solver
+use equix as equix_crate;
 
 pub use argon2::Params as Argon2Params;
 pub use scrypt::Params as ScryptParams;
@@ -413,14 +416,335 @@ pub mod bench {
     }
 }
 
+// ===== EquiX proof-carrying (low‑cost verification) helpers =====
+
+/// 16‑byte EquiX solution (8×u16, LE) — stable wrapper for external use.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct EquixSolution(pub [u8; 16]);
+
+/// A proof for EquiX: includes `work_nonce` and the concrete solution bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct EquixProof {
+    /// Client‑selected search nonce; server replays it to rebuild the challenge.
+    pub work_nonce: u64,
+    /// Concrete EquiX solution bytes; verifier checks with `equix::verify_bytes`.
+    pub solution: EquixSolution,
+}
+
+/// A bundle of EquiX proofs along with a base tag for replay protection.
+/// Server can store only the `base_tag`; the remaining tags can be derived deterministically.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct EquixProofBundle {
+    pub base_tag: [u8; 32],
+    pub proofs: Vec<EquixProof>,
+}
+
+impl EquixProofBundle {
+    /// Verify all proofs against the provided seed and difficulty.
+    pub fn verify_all(&self, seed: &[u8], bits: u32) -> Result<Vec<bool>, String> {
+        let mut out = Vec::with_capacity(self.proofs.len());
+        for p in &self.proofs {
+            let ok = equix_check_bits(seed, p, bits)?;
+            out.push(ok);
+        }
+        Ok(out)
+    }
+
+    /// Derived tags for proofs[1..]; server can avoid storing multiple keys.
+    pub fn derived_tags(&self) -> Vec<[u8; 32]> {
+        if self.proofs.len() <= 1 {
+            return Vec::new();
+        }
+        derive_replay_tags(&self.base_tag, self.proofs.len() - 1)
+    }
+}
+
+/// Build EquiX challenge bytes from an application‑defined seed and a `work_nonce`.
+///
+/// Recommendation: let `seed = SHA256("rspow:equix:v1|" || encode(server_nonce) || encode(data))`.
+/// Then reuse `seed` across attempts and only vary `work_nonce` per try.
+pub fn equix_challenge(seed: &[u8], work_nonce: u64) -> Vec<u8> {
+    let mut ch = Vec::with_capacity(seed.len() + 8);
+    ch.extend_from_slice(seed);
+    ch.extend_from_slice(&work_nonce.to_le_bytes());
+    ch
+}
+
+/// Verify a single EquiX proof and return `sha256(solution_bytes)` if valid.
+///
+/// This is an O(1) verification path: it does not try to solve EquiX.
+pub fn equix_verify_solution(seed: &[u8], proof: &EquixProof) -> Result<[u8; 32], String> {
+    let challenge = equix_challenge(seed, proof.work_nonce);
+    equix_crate::verify_bytes(&challenge, &proof.solution.0).map_err(|e| e.to_string())?;
+    let mut hasher = Sha256::new();
+    hasher.update(proof.solution.0);
+    let h = hasher.finalize();
+    Ok(h.into())
+}
+
+/// Verify that the proof meets a leading‑zero‑bits difficulty.
+pub fn equix_check_bits(seed: &[u8], proof: &EquixProof, bits: u32) -> Result<bool, String> {
+    let hash = equix_verify_solution(seed, proof)?;
+    Ok(meets_leading_zero_bits(&hash, bits))
+}
+
+/// Solve EquiX by varying `work_nonce`, returning the first proof meeting `bits`.
+///
+/// This is the client‑side search routine. It skips challenges that construct/solve with
+/// zero solutions and continues with the next `work_nonce`.
+pub fn equix_solve_with_bits(
+    seed: &[u8],
+    bits: u32,
+    start_work_nonce: u64,
+) -> Result<(EquixProof, [u8; 32]), String> {
+    let mut work_nonce = start_work_nonce;
+    loop {
+        let challenge = equix_challenge(seed, work_nonce);
+        // Build EquiX; on rare constraint errors, skip to next work_nonce.
+        let equix = match equix_crate::EquiX::new(&challenge) {
+            Ok(e) => e,
+            Err(_) => {
+                work_nonce = work_nonce
+                    .checked_add(1)
+                    .ok_or_else(|| "work_nonce overflow".to_owned())?;
+                continue;
+            }
+        };
+        let solutions = equix.solve();
+        for sol in solutions.iter() {
+            let bytes = sol.to_bytes();
+            let mut hasher = Sha256::new();
+            hasher.update(bytes);
+            let hash: [u8; 32] = hasher.finalize().into();
+            if meets_leading_zero_bits(&hash, bits) {
+                let proof = EquixProof {
+                    work_nonce,
+                    solution: EquixSolution(bytes),
+                };
+                return Ok((proof, hash));
+            }
+        }
+        work_nonce = work_nonce
+            .checked_add(1)
+            .ok_or_else(|| "work_nonce overflow".to_owned())?;
+    }
+}
+
+/// Parallel EquiX solve: collect up to `hits` proofs using `threads` workers, varying `work_nonce`.
+#[allow(clippy::type_complexity)]
+pub fn equix_solve_parallel_hits(
+    seed: &[u8],
+    bits: u32,
+    hits: usize,
+    threads: usize,
+    start_work_nonce: u64,
+) -> Result<Vec<(EquixProof, [u8; 32])>, String> {
+    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::thread;
+
+    if threads == 0 || hits == 0 {
+        return Err("threads and hits must be >= 1".to_owned());
+    }
+    let seed = seed.to_vec();
+    let next_wn = Arc::new(AtomicU64::new(start_work_nonce));
+    let found = Arc::new(AtomicUsize::new(0));
+    let stop = Arc::new(AtomicBool::new(false));
+    let out: Arc<Mutex<Vec<(EquixProof, [u8; 32])>>> =
+        Arc::new(Mutex::new(Vec::with_capacity(hits)));
+
+    let mut joins = Vec::with_capacity(threads);
+    for _ in 0..threads {
+        let seed_t = seed.clone();
+        let next_t = next_wn.clone();
+        let found_t = found.clone();
+        let stop_t = stop.clone();
+        let out_t = out.clone();
+        let j = thread::spawn(move || {
+            loop {
+                if stop_t.load(Ordering::Relaxed) {
+                    break;
+                }
+                let wn = next_t.fetch_add(1, Ordering::Relaxed);
+                let challenge = equix_challenge(&seed_t, wn);
+                let eq = match equix_crate::EquiX::new(&challenge) {
+                    Ok(e) => e,
+                    Err(_) => continue,
+                };
+                let sols = eq.solve();
+                for sol in sols.iter() {
+                    let bytes = sol.to_bytes();
+                    let mut hasher = Sha256::new();
+                    hasher.update(bytes);
+                    let hash: [u8; 32] = hasher.finalize().into();
+                    if meets_leading_zero_bits(&hash, bits) {
+                        let proof = EquixProof {
+                            work_nonce: wn,
+                            solution: EquixSolution(bytes),
+                        };
+                        if let Ok(mut v) = out_t.lock() {
+                            if v.len() < hits {
+                                v.push((proof, hash));
+                                let f = found_t.fetch_add(1, Ordering::SeqCst) + 1;
+                                if f >= hits {
+                                    stop_t.store(true, Ordering::SeqCst);
+                                }
+                            }
+                        }
+                        break; // next work_nonce
+                    }
+                }
+            }
+        });
+        joins.push(j);
+    }
+    for j in joins {
+        let _ = j.join();
+    }
+    let out = out
+        .lock()
+        .map(|v| v.clone())
+        .map_err(|_| "poison".to_owned())?;
+    Ok(out)
+}
+
+/// Derive replay tags from a base tag to avoid storing multiple keys server-side.
+/// If your server has a secret, prefer HMAC(base, idx) at the application layer.
+pub fn derive_replay_tags(base_tag: &[u8; 32], count: usize) -> Vec<[u8; 32]> {
+    let mut v = Vec::with_capacity(count);
+    for i in 1..=count {
+        let mut h = Sha256::new();
+        h.update(b"rspow:replay:v1|");
+        h.update(base_tag);
+        h.update((i as u64).to_le_bytes());
+        v.push(h.finalize().into());
+    }
+    v
+}
+
+// ===== Generic parallel PoW (multi-hit) =====
+
+/// A single PoW hit found by the parallel solver.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct PowHit {
+    pub nonce: u64,
+    pub hash: [u8; 32],
+}
+
+/// Configuration for the parallel PoW solver.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ParPowCfg {
+    pub threads: usize,
+    pub hits: usize,
+    pub start_nonce: u64,
+}
+
+impl ParPowCfg {
+    /// Build a configuration with default threads = max(1, num_cpus-1), hits=1, start_nonce=0.
+    pub fn default_with_hits(hits: usize) -> Self {
+        let p = std::thread::available_parallelism()
+            .map(|nz| nz.get())
+            .unwrap_or(1)
+            .saturating_sub(1)
+            .max(1);
+        ParPowCfg {
+            threads: p,
+            hits,
+            start_nonce: 0,
+        }
+    }
+}
+
+/// Solve a PoW in parallel and collect up to `cfg.hits` distinct nonces that satisfy the difficulty.
+/// Works with any `PoWAlgorithm` and both difficulty modes.
+pub fn pow_solve_parallel_hits(pow: &PoW, cfg: &ParPowCfg) -> Result<Vec<PowHit>, String> {
+    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::thread;
+
+    if cfg.threads == 0 || cfg.hits == 0 {
+        return Err("threads and hits must be >= 1".to_owned());
+    }
+
+    let pow = pow.clone();
+    let target_ascii = match pow.mode {
+        DifficultyMode::AsciiZeroPrefix => Some(pow.calculate_target()),
+        DifficultyMode::LeadingZeroBits => None,
+    };
+    let next_nonce = Arc::new(AtomicU64::new(cfg.start_nonce));
+    let found = Arc::new(AtomicUsize::new(0));
+    let stop = Arc::new(AtomicBool::new(false));
+    let hits: Arc<Mutex<Vec<PowHit>>> = Arc::new(Mutex::new(Vec::with_capacity(cfg.hits)));
+
+    let mut joins = Vec::with_capacity(cfg.threads);
+    for _ in 0..cfg.threads {
+        let pow_t = pow.clone();
+        let target_t = target_ascii.clone();
+        let next = next_nonce.clone();
+        let found_t = found.clone();
+        let stop_t = stop.clone();
+        let hits_t = hits.clone();
+        let hits_cap = cfg.hits;
+        let j = thread::spawn(move || loop {
+            if stop_t.load(Ordering::Relaxed) {
+                break;
+            }
+            let n = next.fetch_add(1, Ordering::Relaxed) as usize;
+            let hash_vec = pow_t.algorithm.calculate(&pow_t.data, n);
+            let ok = match pow_t.mode {
+                DifficultyMode::AsciiZeroPrefix => {
+                    let t = target_t.as_ref().expect("ascii target exists");
+                    hash_vec.starts_with(t)
+                }
+                DifficultyMode::LeadingZeroBits => {
+                    meets_leading_zero_bits(&hash_vec, pow_t.difficulty as u32)
+                }
+            };
+            if ok {
+                let mut h32 = [0u8; 32];
+                h32.copy_from_slice(&hash_vec[..32.min(hash_vec.len())]);
+                if let Ok(mut v) = hits_t.lock() {
+                    if v.len() < hits_cap {
+                        v.push(PowHit {
+                            nonce: n as u64,
+                            hash: h32,
+                        });
+                        let f = found_t.fetch_add(1, Ordering::SeqCst) + 1;
+                        if f >= hits_cap {
+                            stop_t.store(true, Ordering::SeqCst);
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+        joins.push(j);
+    }
+    for j in joins {
+        let _ = j.join();
+    }
+    let out = hits
+        .lock()
+        .map(|v| v.clone())
+        .map_err(|_| "poison".to_owned())?;
+    Ok(out)
+}
+
 /// Enum defining different Proof of Work (PoW) algorithms.
 #[allow(non_camel_case_types)]
+#[derive(Clone, Debug)]
 pub enum PoWAlgorithm {
     Sha2_256,
     Sha2_512,
     RIPEMD_320,
     Scrypt(ScryptParams),
     Argon2id(Argon2Params),
+    /// Equi‑X client puzzle: challenge is `data || nonce_le`.
+    /// If one or more solutions exist, take the lexicographically smallest
+    /// solution's bytes, hash with `sha256`, and use that as the output.
+    /// If there is no solution or construction fails, return 32 bytes of 0xFF
+    /// (ensures difficulty check fails).
+    EquiX,
 }
 
 impl PoWAlgorithm {
@@ -479,6 +803,48 @@ impl PoWAlgorithm {
         output
     }
 
+    /// Calculates EquiX-based pseudo-hash with given data and nonce.
+    ///
+    /// Rule: challenge = `data || nonce.to_le_bytes()`. Run EquiX.
+    /// If solutions exist, choose the lexicographically smallest 16‑byte
+    /// solution and return `sha256(solution_bytes)`; otherwise or on error,
+    /// return 32 bytes of `0xFF`.
+    pub fn calculate_equix(data: &[u8], nonce: usize) -> Vec<u8> {
+        // Build challenge: data || nonce (little‑endian)
+        let mut challenge = Vec::with_capacity(data.len() + std::mem::size_of::<usize>());
+        challenge.extend_from_slice(data);
+        challenge.extend_from_slice(&nonce.to_le_bytes());
+
+        // Instantiate EquiX and solve
+        let equix = match equix_crate::EquiX::new(&challenge) {
+            Ok(e) => e,
+            Err(_) => return vec![0xFFu8; 32],
+        };
+        let solutions = equix.solve();
+        if solutions.is_empty() {
+            return vec![0xFFu8; 32];
+        }
+
+        // Pick lexicographically smallest solution bytes
+        let mut best: Option<Vec<u8>> = None;
+        for sol in solutions.iter() {
+            let bytes = sol.to_bytes(); // fixed 16 bytes
+            match &mut best {
+                None => best = Some(bytes.to_vec()),
+                Some(prev) => {
+                    if bytes.as_slice() < prev.as_slice() {
+                        *prev = bytes.to_vec();
+                    }
+                }
+            }
+        }
+
+        let best_bytes = best.expect("solutions not empty");
+        let mut hasher = Sha256::new();
+        hasher.update(&best_bytes);
+        hasher.finalize().to_vec()
+    }
+
     /// Calculates hash based on the selected algorithm.
     pub fn calculate(&self, data: &[u8], nonce: usize) -> Vec<u8> {
         match self {
@@ -487,6 +853,7 @@ impl PoWAlgorithm {
             Self::RIPEMD_320 => Self::calculate_ripemd_320(data, nonce),
             Self::Scrypt(params) => Self::calculate_scrypt(data, nonce, params),
             Self::Argon2id(params) => Self::calculate_argon2id(data, nonce, params),
+            Self::EquiX => Self::calculate_equix(data, nonce),
         }
     }
 }
@@ -529,7 +896,7 @@ pub fn meets_leading_zero_bits(hash: &[u8], bits: u32) -> bool {
 }
 
 /// Difficulty modes supported by PoW.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub enum DifficultyMode {
     /// Legacy mode: prefix must be ASCII '0' bytes (0x30), one per difficulty level.
     AsciiZeroPrefix,
@@ -538,11 +905,290 @@ pub enum DifficultyMode {
 }
 
 /// Struct representing Proof of Work (PoW) with data, difficulty, and algorithm.
+#[derive(Clone, Debug)]
 pub struct PoW {
     data: Vec<u8>,
     difficulty: usize,
     algorithm: PoWAlgorithm,
     mode: DifficultyMode,
+}
+
+// ---- Eq / PartialEq / Hash for DifficultyMode, PoWAlgorithm, PoW ----
+
+impl PartialEq for DifficultyMode {
+    fn eq(&self, other: &Self) -> bool {
+        matches!(
+            (self, other),
+            (Self::AsciiZeroPrefix, Self::AsciiZeroPrefix)
+                | (Self::LeadingZeroBits, Self::LeadingZeroBits)
+        )
+    }
+}
+impl Eq for DifficultyMode {}
+impl std::hash::Hash for DifficultyMode {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        match self {
+            DifficultyMode::AsciiZeroPrefix => 0u8.hash(state),
+            DifficultyMode::LeadingZeroBits => 1u8.hash(state),
+        }
+    }
+}
+
+impl PartialEq for PoWAlgorithm {
+    fn eq(&self, other: &Self) -> bool {
+        use PoWAlgorithm::*;
+        match (self, other) {
+            (Sha2_256, Sha2_256) => true,
+            (Sha2_512, Sha2_512) => true,
+            (RIPEMD_320, RIPEMD_320) => true,
+            (Scrypt(a), Scrypt(b)) => a.log_n() == b.log_n() && a.r() == b.r() && a.p() == b.p(),
+            (Argon2id(a), Argon2id(b)) => {
+                a.m_cost() == b.m_cost() && a.t_cost() == b.t_cost() && a.p_cost() == b.p_cost()
+            }
+            (EquiX, EquiX) => true,
+            _ => false,
+        }
+    }
+}
+impl Eq for PoWAlgorithm {}
+impl std::hash::Hash for PoWAlgorithm {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        use PoWAlgorithm::*;
+        match self {
+            Sha2_256 => 0u8.hash(state),
+            Sha2_512 => 1u8.hash(state),
+            RIPEMD_320 => 2u8.hash(state),
+            Scrypt(p) => {
+                3u8.hash(state);
+                p.log_n().hash(state);
+                p.r().hash(state);
+                p.p().hash(state);
+            }
+            Argon2id(p) => {
+                4u8.hash(state);
+                p.m_cost().hash(state);
+                p.t_cost().hash(state);
+                p.p_cost().hash(state);
+            }
+            EquiX => 5u8.hash(state),
+        }
+    }
+}
+
+impl PartialEq for PoW {
+    fn eq(&self, other: &Self) -> bool {
+        self.data == other.data
+            && self.difficulty == other.difficulty
+            && self.algorithm == other.algorithm
+            && self.mode == other.mode
+    }
+}
+impl Eq for PoW {}
+impl std::hash::Hash for PoW {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.data.hash(state);
+        self.difficulty.hash(state);
+        self.algorithm.hash(state);
+        self.mode.hash(state);
+    }
+}
+
+// ---- Serde for DifficultyMode, PoWAlgorithm, PoW ----
+
+impl Serialize for DifficultyMode {
+    fn serialize<S>(
+        &self,
+        serializer: S,
+    ) -> Result<<S as serde::Serializer>::Ok, <S as serde::Serializer>::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            DifficultyMode::AsciiZeroPrefix => serializer.serialize_str("AsciiZeroPrefix"),
+            DifficultyMode::LeadingZeroBits => serializer.serialize_str("LeadingZeroBits"),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for DifficultyMode {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        match s.as_str() {
+            "AsciiZeroPrefix" => Ok(DifficultyMode::AsciiZeroPrefix),
+            "LeadingZeroBits" => Ok(DifficultyMode::LeadingZeroBits),
+            other => Err(serde::de::Error::unknown_variant(
+                other,
+                &["AsciiZeroPrefix", "LeadingZeroBits"],
+            )),
+        }
+    }
+}
+
+impl Serialize for PoWAlgorithm {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use PoWAlgorithm::*;
+        match self {
+            Sha2_256 => serializer.serialize_str("Sha2_256"),
+            Sha2_512 => serializer.serialize_str("Sha2_512"),
+            RIPEMD_320 => serializer.serialize_str("RIPEMD_320"),
+            EquiX => serializer.serialize_str("EquiX"),
+            Scrypt(p) => {
+                #[derive(Serialize)]
+                struct ScryptParamsSer {
+                    log_n: u8,
+                    r: u32,
+                    p: u32,
+                }
+                let wrapper = ScryptParamsSer {
+                    log_n: p.log_n(),
+                    r: p.r(),
+                    p: p.p(),
+                };
+                let mut st = serializer.serialize_struct("Scrypt", 1)?;
+                st.serialize_field("Scrypt", &wrapper)?;
+                st.end()
+            }
+            Argon2id(p) => {
+                #[derive(Serialize)]
+                struct Argon2ParamsSer {
+                    m_kib: u32,
+                    t_cost: u32,
+                    p_cost: u32,
+                }
+                let wrapper = Argon2ParamsSer {
+                    m_kib: p.m_cost(),
+                    t_cost: p.t_cost(),
+                    p_cost: p.p_cost(),
+                };
+                let mut st = serializer.serialize_struct("Argon2id", 1)?;
+                st.serialize_field("Argon2id", &wrapper)?;
+                st.end()
+            }
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for PoWAlgorithm {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::{Error, MapAccess, Visitor};
+        use std::fmt;
+
+        // Accept either a unit string variant or an object {Variant: {..}} for params variants
+        struct AlgoVisitor;
+        impl<'de> Visitor<'de> for AlgoVisitor {
+            type Value = PoWAlgorithm;
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("PoWAlgorithm as string or single-key object")
+            }
+            fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+            where
+                E: Error,
+            {
+                match v {
+                    "Sha2_256" => Ok(PoWAlgorithm::Sha2_256),
+                    "Sha2_512" => Ok(PoWAlgorithm::Sha2_512),
+                    "RIPEMD_320" => Ok(PoWAlgorithm::RIPEMD_320),
+                    "EquiX" => Ok(PoWAlgorithm::EquiX),
+                    _ => Err(E::unknown_variant(
+                        v,
+                        &[
+                            "Sha2_256",
+                            "Sha2_512",
+                            "RIPEMD_320",
+                            "Scrypt",
+                            "Argon2id",
+                            "EquiX",
+                        ],
+                    )),
+                }
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                if let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "Scrypt" => {
+                            #[derive(Deserialize)]
+                            struct ScryptParamsDe {
+                                log_n: u8,
+                                r: u32,
+                                p: u32,
+                            }
+                            let p = map.next_value::<ScryptParamsDe>()?;
+                            // We default to 32 bytes output length which matches this crate's use.
+                            let params = ScryptParams::new(p.log_n, p.r, p.p, 32)
+                                .map_err(|e| A::Error::custom(e.to_string()))?;
+                            Ok(PoWAlgorithm::Scrypt(params))
+                        }
+                        "Argon2id" => {
+                            #[derive(Deserialize)]
+                            struct Argon2ParamsDe {
+                                m_kib: u32,
+                                t_cost: u32,
+                                p_cost: u32,
+                            }
+                            let p = map.next_value::<Argon2ParamsDe>()?;
+                            let params = Argon2Params::new(p.m_kib, p.t_cost, p.p_cost, None)
+                                .map_err(|e| A::Error::custom(e.to_string()))?;
+                            Ok(PoWAlgorithm::Argon2id(params))
+                        }
+                        other => Err(A::Error::unknown_field(other, &["Scrypt", "Argon2id"])),
+                    }
+                } else {
+                    Err(A::Error::custom("empty map for PoWAlgorithm"))
+                }
+            }
+        }
+        deserializer.deserialize_any(AlgoVisitor)
+    }
+}
+
+impl Serialize for PoW {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut st = serializer.serialize_struct("PoW", 4)?;
+        st.serialize_field("data", &self.data)?;
+        st.serialize_field("difficulty", &self.difficulty)?;
+        st.serialize_field("algorithm", &self.algorithm)?;
+        st.serialize_field("mode", &self.mode)?;
+        st.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for PoW {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct PoWDe {
+            data: Vec<u8>,
+            difficulty: usize,
+            algorithm: PoWAlgorithm,
+            mode: DifficultyMode,
+        }
+        let raw = PoWDe::deserialize(deserializer)?;
+        Ok(PoW {
+            data: raw.data,
+            difficulty: raw.difficulty,
+            algorithm: raw.algorithm,
+            mode: raw.mode,
+        })
+    }
 }
 
 impl PoW {
@@ -634,6 +1280,8 @@ impl PoW {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::{from_str, to_string};
+    use std::collections::HashSet;
 
     #[test]
     fn test_pow_algorithm_sha2_256() {
@@ -745,10 +1393,10 @@ mod tests {
         assert!(pow.verify_pow(&[], (hash, nonce)));
     }
 
-    // -------- 按比特前缀判定工具函数测试 --------
+    // -------- Leading‑zero‑bits helper tests --------
     #[test]
     fn test_meets_leading_zero_bits_basic() {
-        // 0x00 0x00 0xFF -> 前 16 比特均为 0，第 17 比特为 1
+        // 0x00 0x00 0xFF -> first 16 bits are 0; the 17th bit is 1
         let h = [0x00u8, 0x00u8, 0xFFu8];
         assert!(meets_leading_zero_bits(&h, 0));
         assert!(meets_leading_zero_bits(&h, 1));
@@ -762,23 +1410,162 @@ mod tests {
 
     #[test]
     fn test_meets_leading_zero_bits_edges() {
-        // 最高位为 1：0x80 -> 1000_0000
+        // MSB is 1: 0x80 -> 1000_0000
         let h1 = [0x80u8, 0x00u8];
         assert!(!meets_leading_zero_bits(&h1, 1));
 
-        // 0x7F -> 0111_1111，前导零仅 1 位
+        // 0x7F -> 0111_1111, has only 1 leading zero bit
         let h2 = [0x7Fu8, 0xFFu8];
         assert!(meets_leading_zero_bits(&h2, 1));
         assert!(!meets_leading_zero_bits(&h2, 2));
 
-        // 0x00 0x80：前 8 位为 0，第 9 位为 1
+        // 0x00 0x80: first 8 bits are zero; the 9th is 1
         let h3 = [0x00u8, 0x80u8];
         assert!(meets_leading_zero_bits(&h3, 8));
         assert!(!meets_leading_zero_bits(&h3, 9));
 
-        // 长度不足：bits 超出可用位数
+        // Out of range: bits exceed available bit length
         let h4 = [0x00u8, 0x00u8, 0x00u8];
         assert!(meets_leading_zero_bits(&h4, 24));
         assert!(!meets_leading_zero_bits(&h4, 25));
+    }
+
+    // -------- Serde/Eq/Hash regression tests --------
+    #[test]
+    fn serde_roundtrip_powalgorithm_variants() {
+        let a1 = PoWAlgorithm::Sha2_256;
+        let s1 = to_string(&a1).unwrap();
+        let b1: PoWAlgorithm = from_str(&s1).unwrap();
+        assert_eq!(a1, b1);
+
+        let a2 = PoWAlgorithm::Argon2id(Argon2Params::new(16, 2, 1, None).unwrap());
+        let s2 = to_string(&a2).unwrap();
+        let b2: PoWAlgorithm = from_str(&s2).unwrap();
+        assert_eq!(a2, b2);
+
+        let a3 = PoWAlgorithm::Scrypt(ScryptParams::new(8, 4, 1, 32).unwrap());
+        let s3 = to_string(&a3).unwrap();
+        let b3: PoWAlgorithm = from_str(&s3).unwrap();
+        assert_eq!(a3, b3);
+
+        let a4 = PoWAlgorithm::EquiX;
+        let s4 = to_string(&a4).unwrap();
+        let b4: PoWAlgorithm = from_str(&s4).unwrap();
+        assert_eq!(a4, b4);
+    }
+
+    #[test]
+    fn serde_roundtrip_pow() {
+        let pow = PoW::with_mode(
+            "data",
+            12,
+            PoWAlgorithm::Sha2_256,
+            DifficultyMode::LeadingZeroBits,
+        )
+        .unwrap();
+        let s = to_string(&pow).unwrap();
+        let back: PoW = from_str(&s).unwrap();
+        assert_eq!(pow, back);
+    }
+
+    #[test]
+    fn hash_set_pow_and_algo() {
+        let pow = PoW::new("hi", 2, PoWAlgorithm::Sha2_512).unwrap();
+        let mut hs = HashSet::new();
+        hs.insert(pow.clone());
+        assert!(hs.contains(&pow));
+
+        let algo = PoWAlgorithm::Argon2id(Argon2Params::new(32, 3, 2, None).unwrap());
+        let mut hs2 = HashSet::new();
+        hs2.insert(algo.clone());
+        assert!(hs2.contains(&algo));
+    }
+
+    // -------- EquiX basic integration tests --------
+    #[test]
+    fn test_pow_algorithm_equix_calculate_deterministic() {
+        let data = b"hello world";
+        let nonce = 42usize;
+        let h1 = PoWAlgorithm::calculate_equix(data, nonce);
+        let h2 = PoWAlgorithm::calculate_equix(data, nonce);
+        assert_eq!(h1, h2);
+        assert_eq!(h1.len(), 32);
+    }
+
+    #[test]
+    fn test_pow_equix_bits_zero_trivial() {
+        // bits=0 should pass immediately at nonce=0 (verification also succeeds),
+        // providing a fast regression without heavy computation.
+        let data = "hello equix";
+        let pow = PoW::with_mode(
+            data,
+            0,
+            PoWAlgorithm::EquiX,
+            DifficultyMode::LeadingZeroBits,
+        )
+        .unwrap();
+        let (hash, nonce) = pow.calculate_pow(&[]);
+        assert_eq!(nonce, 0);
+        assert_eq!(hash.len(), 32);
+        assert!(pow.verify_pow(&[], (hash, nonce)));
+    }
+
+    // -------- Proof-carrying EquiX tests (low-cost verification) --------
+    #[test]
+    fn test_equix_proof_roundtrip_bits0() {
+        // Derive a seed once; in production you should domain-separate and include server_nonce+data.
+        let mut seed_hasher = Sha256::new();
+        seed_hasher.update(b"seed-for-test");
+        let seed = seed_hasher.finalize();
+
+        // Solve for bits=0 starting from work_nonce=0.
+        let (proof, hash) = equix_solve_with_bits(&seed, 0, 0).expect("solve");
+        // Verify returns the same hash and meets bits=0 trivially.
+        let verified_hash = equix_verify_solution(&seed, &proof).expect("verify");
+        assert_eq!(hash, verified_hash);
+        assert!(equix_check_bits(&seed, &proof, 0).unwrap());
+    }
+
+    #[test]
+    fn test_equix_verify_with_manual_solution() {
+        // Build a challenge with small search window to find any solution.
+        let mut seed_hasher = Sha256::new();
+        seed_hasher.update(b"seed-for-test-2");
+        let seed = seed_hasher.finalize();
+
+        let mut found = None;
+        for wn in 0u64..64 {
+            let challenge = equix_challenge(&seed, wn);
+            if let Ok(eq) = equix_crate::EquiX::new(&challenge) {
+                let sols = eq.solve();
+                if let Some(sol) = sols.iter().next() {
+                    found = Some((wn, EquixSolution(sol.to_bytes())));
+                    break;
+                }
+            }
+        }
+        let (work_nonce, solution) = found.expect("at least one solution in small window");
+        let proof = EquixProof {
+            work_nonce,
+            solution,
+        };
+
+        let h = equix_verify_solution(&seed, &proof).expect("verify");
+        assert_eq!(h.len(), 32);
+        // bits=0 must pass; bits=1 may or may not pass — just check the trivial case.
+        assert!(equix_check_bits(&seed, &proof, 0).unwrap());
+    }
+
+    #[test]
+    fn test_equix_verify_rejects_tampered_solution() {
+        let mut seed_hasher = Sha256::new();
+        seed_hasher.update(b"seed-for-test-3");
+        let seed = seed_hasher.finalize();
+
+        // Find a valid proof (bits=0, trivial).
+        let (mut proof, _h) = equix_solve_with_bits(&seed, 0, 0).expect("solve");
+        // Tamper one byte in the solution; verify should fail.
+        proof.solution.0[0] ^= 0x01;
+        assert!(equix_verify_solution(&seed, &proof).is_err());
     }
 }

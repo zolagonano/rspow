@@ -14,6 +14,7 @@ A simple multi-algorithm proof-of-work library for Rust.
 - [x] RIPEMD-320
 - [x] Scrypt
 - [x] Argon2id
+- [x] EquiX (Tor's Equi‑X puzzle; hash = sha256(solution-bytes))
 
 API references are available at [docs.rs/rspow](https://docs.rs/rspow).
 
@@ -64,6 +65,122 @@ let (hash, nonce) = pow.calculate_pow(&[]); // target is ignored in bits mode
 assert!(rspow::meets_leading_zero_bits(&hash, bits as u32));
 assert!(pow.verify_pow(&[], (hash, nonce)));
 ```
+
+### EquiX (Tor Equi‑X puzzle)
+
+```rust
+use rspow::{PoW, PoWAlgorithm, DifficultyMode};
+
+let data = b"hello world";
+let bits = 1; // expected attempts ≈ 2^bits; EquiX solver may yield 0+ solutions per challenge
+let pow = PoW::with_mode(data, bits, PoWAlgorithm::EquiX, DifficultyMode::LeadingZeroBits).unwrap();
+
+// For demonstrations/tests you can also use bits=0 to avoid long loops
+let (hash, nonce) = pow.calculate_pow(&[]);
+assert!(hash.len() == 32);
+```
+
+### EquiX proof-carrying API (O(1) verification)
+
+For production use, prefer a proof that carries the EquiX solution bytes so the server verifies in constant time without solving:
+
+```rust
+use rspow::{EquixProof, EquixSolution, equix_solve_with_bits, equix_verify_solution, equix_check_bits};
+use sha2::{Digest, Sha256};
+
+// Derive a domain-separated seed once per request
+let server_nonce = b"signed-token"; // signed & time-limited by the server
+let data = b"payload";
+let mut h = Sha256::new();
+h.update(b"rspow:equix:v1|");
+h.update(&(server_nonce.len() as u64).to_le_bytes());
+h.update(server_nonce);
+h.update(&(data.len() as u64).to_le_bytes());
+h.update(data);
+let seed: [u8; 32] = h.finalize().into();
+
+// Client: search by varying work_nonce
+let bits: u32 = 8;
+let (proof, hash) = equix_solve_with_bits(&seed, bits, 0)?;
+
+// Server: verify O(1)
+let vhash = equix_verify_solution(&seed, &proof)?;
+assert_eq!(hash, vhash);
+assert!(equix_check_bits(&seed, &proof, bits)?);
+```
+
+Notes:
+- Recommended seed: `SHA256("rspow:equix:v1|" || encode(server_nonce) || encode(data))`. Then build `challenge = seed || LE(work_nonce)` per attempt.
+- Submit `{ server_nonce, work_nonce, solution_bytes }`. The server rebuilds `seed` and verifies via `equix_verify_solution` and `equix_check_bits`.
+- To increase pressure under attack, require `m` independent proofs with distinct `work_nonce` values; each proof still verifies in O(1).
+
+### EquiX proof bundles (batch verify + storage‑efficient anti‑replay)
+
+For multiple concurrent proofs, bundle them so the server verifies all in O(1) per proof while storing only a single anti‑replay key:
+
+```rust
+use rspow::{EquixProofBundle, equix_solve_parallel_hits};
+use sha2::{Digest, Sha256};
+
+// Client derives seed once (domain-separated) and solves in parallel
+let seed = {
+    let mut h = Sha256::new();
+    h.update(b"rspow:equix:v1|");
+    h.update(&(server_nonce.len() as u64).to_le_bytes());
+    h.update(server_nonce);
+    h.update(&(data.len() as u64).to_le_bytes());
+    h.update(data);
+    h.finalize()
+};
+let results = equix_solve_parallel_hits(&seed, bits, hits, threads, 0)?; // Vec<(EquixProof, [u8;32])>
+
+// Base tag from the first proof (server stores only this); the rest are derived
+let (first, _) = &results[0];
+let base_tag: [u8;32] = {
+    let mut h = Sha256::new();
+    h.update(b"rspow:tag:v1|");
+    h.update(server_nonce); // include signed nonce
+    h.update(data);
+    h.update(first.work_nonce.to_le_bytes());
+    h.update(first.solution.0);
+    h.finalize().into()
+};
+
+let bundle = EquixProofBundle { base_tag, proofs: results.into_iter().map(|(p,_)| p).collect() };
+
+// Server: re-derive seed, verify all proofs in O(1), and derive follow-up tags to avoid multiple keys
+let oks = bundle.verify_all(&seed, bits)?; // all true
+let derived = bundle.derived_tags(); // tag[1..]
+```
+
+Example:
+
+```
+cargo run --release --example equix_bundle_demo -- --data hello --server-nonce sn --bits 1 --hits 4 --threads 8
+```
+
+## Examples and Benchmarks
+
+- Proof-carrying EquiX demo:
+  ```
+  cargo run --release --example equix_proof_demo -- --data hello --server-nonce sn --bits 1 --start 0
+  ```
+
+- General PoW benchmark (select algorithm and mode):
+  ```
+  # Default repeats is 300 to reduce measurement noise.
+  cargo run --release --example pow_bench -- --algo sha2_256 --mode bits --difficulty 12 --data hello
+  cargo run --release --example pow_bench -- --algo scrypt --mode ascii --difficulty 2 --scrypt-logn 10 --scrypt-r 8 --scrypt-p 1
+  cargo run --release --example pow_bench -- --algo argon2id --mode bits --difficulty 8 --argon2-m-kib 65536 --argon2-t 3 --argon2-p 1
+  cargo run --release --example pow_bench -- --algo equix --mode bits --difficulty 1 --server-nonce sn --start-work-nonce 0
+  ```
+
+- CSV columns:
+  - Per-run rows: `kind,algo,mode,difficulty,data_len,run_idx,time_ms,tries,nonce_or_work,hash_hex`.
+    - For EquiX, `tries` equals the number of challenges (work_nonce values) attempted per found solution — this directly measures “attempts per solution”.
+  - Summary row (appended at the end with its own header):
+    `kind,algo,mode,difficulty,data_len,mean_time_ms,std_time_ms,stderr_time_ms,ci95_low_time_ms,ci95_high_time_ms,mean_tries,std_tries,stderr_tries,ci95_low_tries,ci95_high_tries`.
+
 
 ### Argon2id with custom parameters
 
@@ -183,3 +300,32 @@ To use KPoW with true threads in the browser (std::thread over Web Workers):
 
 - Existing code using `PoW::new` and `calculate_target()` keeps the legacy behavior by default.
 - New code is encouraged to adopt `DifficultyMode::LeadingZeroBits` for precise difficulty control.
+
+### Parallel client PoW (latency/throughput trade-off)
+
+The `parallel_bench` example explores per-device scale-up by varying threads (default `nproc-1`) and measuring both time-to-first-hit and time-to-H-hits:
+
+```
+cargo run --release --example parallel_bench -- --algo equix --mode bits --difficulty 1 --hits 8 --threads 8
+cargo run --release --example parallel_bench -- --algo equix --mode bits --difficulty 1 --hits 8 --threads-list 1,2,4,8
+cargo run --release --example parallel_bench -- --algo sha2_256 --mode bits --difficulty 12 --hits 16
+```
+
+Output shows `first_time_ms`, `total_time_ms` and `throughput_hits_per_s`. Increasing parallelism often raises the latency of a single task slightly (contention, scheduling) yet raises total throughput substantially.
+
+CSV layout (stdout; use `| tee file.csv` to save):
+
+- Per-run rows (one per repeat per threads value):
+  - Header: `kind,algo,mode,bits_or_len,hits,threads,repeat_idx,first_time_ms,total_time_ms,throughput_hits_per_s`.
+  - Semantics:
+    - `first_time_ms`: time to the first successful proof with the given parallelism.
+    - `total_time_ms`: time to collect `hits` proofs (wall time).
+    - `throughput_hits_per_s`: `hits / (total_time_ms/1000)`.
+- Per-threads summary row (one per threads value, preceded by its own header):
+  - Header: `kind,algo,mode,bits_or_len,hits,threads,mean_first_ms,std_first_ms,stderr_first_ms,ci95_low_first_ms,ci95_high_first_ms,mean_total_ms,std_total_ms,stderr_total_ms,ci95_low_total_ms,ci95_high_total_ms,mean_throughput,std_throughput,stderr_throughput,ci95_low_throughput,ci95_high_throughput`.
+  - These are computed over `--repeats` samples at the same `threads`.
+
+Tips for more stable measurements:
+- Use `--repeats 5` (or higher) for each threads value.
+- Keep the system thermals and CPU scaling steady; avoid heavy background load.
+- Expect some increase in `first_time_ms` when threads grow, while `throughput_hits_per_s` typically improves.
