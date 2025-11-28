@@ -1,0 +1,1 @@
+c4ae994 chore(todo): track equix multithread tasks — added an EquiX-focused TODO list (protocol docs, dedup, tests, bundle API, shared dispatcher), and extended .gitignore to cover *.zh.md and .cargo-local/ after encountering global registry permission issues; clippy/test run with CARGO_HOME overridden locally.
