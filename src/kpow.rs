@@ -26,7 +26,9 @@ compile_error!(
      For temporary single-thread fallback during experiments, build with --cfg kpow_allow_single_thread."
 );
 
-use crate::{meets_leading_zero_bits, Argon2Params, PoWAlgorithm};
+use crate::{
+    meets_leading_zero_bits, work::HitStop, work::NonceSource, Argon2Params, PoWAlgorithm,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::time::Instant;
@@ -315,7 +317,7 @@ impl KPow {
         k: usize,
         with_stats: bool,
     ) -> Result<(Vec<KProof>, Option<KPowResult>), String> {
-        use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
         use std::sync::{Arc, Mutex};
         use std::thread;
 
@@ -329,21 +331,20 @@ impl KPow {
 
         struct PuzzleAtomics {
             done: AtomicBool,
-            next_nonce: AtomicU64,
+            nonce: NonceSource,
         }
         let atoms: Arc<Vec<PuzzleAtomics>> = Arc::new(
             (0..k)
                 .map(|_| PuzzleAtomics {
                     done: AtomicBool::new(false),
-                    next_nonce: AtomicU64::new(0),
+                    nonce: NonceSource::new(0),
                 })
                 .collect(),
         );
 
         let proofs_by_idx: Arc<Vec<Mutex<Option<KProof>>>> =
             Arc::new((0..k).map(|_| Mutex::new(None)).collect());
-        let stop = Arc::new(AtomicBool::new(false));
-        let successes = Arc::new(AtomicUsize::new(0));
+        let stop = Arc::new(HitStop::new(k).map_err(|e| format!("stop init: {e}"))?);
         let total_tries_atomic = Arc::new(AtomicU64::new(0));
         let start = if with_stats {
             Some(Instant::now())
@@ -358,19 +359,18 @@ impl KPow {
             let atoms = atoms.clone();
             let proofs_by_idx = proofs_by_idx.clone();
             let stop_flag = stop.clone();
-            let successes_ctr = successes.clone();
             let tries_ctr = total_tries_atomic.clone();
             let k_local = k;
             let bits_local = bits;
             let j = thread::spawn(move || {
                 let mut cursor = t_id % k_local;
                 loop {
-                    if stop_flag.load(Ordering::Relaxed) {
+                    if stop_flag.should_stop() {
                         break;
                     }
                     let mut did_work = false;
                     for step in 0..k_local {
-                        if stop_flag.load(Ordering::Relaxed) {
+                        if stop_flag.should_stop() {
                             break;
                         }
                         let idx = (cursor + step) % k_local;
@@ -378,7 +378,7 @@ impl KPow {
                         if a.done.load(Ordering::Relaxed) {
                             continue;
                         }
-                        let n = a.next_nonce.fetch_add(1, Ordering::Relaxed);
+                        let n = a.nonce.fetch();
                         if a.done.load(Ordering::Relaxed) {
                             continue;
                         }
@@ -398,13 +398,12 @@ impl KPow {
                                     hash: h32,
                                 });
                             }
-                            let prev = successes_ctr.fetch_add(1, Ordering::SeqCst) + 1;
-                            if prev >= k_local {
-                                stop_flag.store(true, Ordering::SeqCst);
+                            if stop_flag.record_hit() {
+                                // already marked stop
                             }
                         }
                         did_work = true;
-                        if stop_flag.load(Ordering::Relaxed) {
+                        if stop_flag.should_stop() {
                             break;
                         }
                     }
@@ -431,12 +430,11 @@ impl KPow {
                 let _ = i;
             }
         }
-        let succ = successes.load(Ordering::Relaxed);
         let stats = if with_stats {
             Some(KPowResult {
                 total_time_ms: start.unwrap().elapsed().as_millis(),
                 total_tries: total_tries_atomic.load(Ordering::Relaxed),
-                successes: succ,
+                successes: stop.found(),
             })
         } else {
             None

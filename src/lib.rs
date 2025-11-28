@@ -29,15 +29,21 @@
 //! let (_hash, _nonce) = pow.calculate_pow(&[]); // target ignored in bits mode
 //! ```
 //!
+pub use argon2::Params as Argon2Params;
 use argon2::{Algorithm, Argon2, Version};
 use ripemd::Ripemd320;
+pub use scrypt::Params as ScryptParams;
 use serde::{ser::SerializeStruct, Deserialize, Serialize};
 use sha2::{Digest, Sha256, Sha512};
-// EquiX solver
-use equix as equix_crate;
 
-pub use argon2::Params as Argon2Params;
-pub use scrypt::Params as ScryptParams;
+pub mod equix;
+mod work;
+
+pub use equix::{
+    equix_challenge, equix_check_bits, equix_solve_bundle, equix_solve_parallel_hits,
+    equix_solve_with_bits, equix_verify_solution, EquixHit, EquixProof, EquixProofBundle,
+    EquixSolution, EquixSolveConfig, EquixSolver,
+};
 
 // Expose KPoW (k puzzles with worker pool) utilities.
 pub mod kpow;
@@ -416,212 +422,6 @@ pub mod bench {
     }
 }
 
-// ===== EquiX proof-carrying (low‑cost verification) helpers =====
-
-/// 16‑byte EquiX solution (8×u16, LE) — stable wrapper for external use.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct EquixSolution(pub [u8; 16]);
-
-/// A proof for EquiX: includes `work_nonce` and the concrete solution bytes.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct EquixProof {
-    /// Client‑selected search nonce; server replays it to rebuild the challenge.
-    pub work_nonce: u64,
-    /// Concrete EquiX solution bytes; verifier checks with `equix::verify_bytes`.
-    pub solution: EquixSolution,
-}
-
-/// A bundle of EquiX proofs along with a base tag for replay protection.
-/// Server can store only the `base_tag`; the remaining tags can be derived deterministically.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct EquixProofBundle {
-    pub base_tag: [u8; 32],
-    pub proofs: Vec<EquixProof>,
-}
-
-impl EquixProofBundle {
-    /// Verify all proofs against the provided seed and difficulty.
-    pub fn verify_all(&self, seed: &[u8], bits: u32) -> Result<Vec<bool>, String> {
-        let mut out = Vec::with_capacity(self.proofs.len());
-        for p in &self.proofs {
-            let ok = equix_check_bits(seed, p, bits)?;
-            out.push(ok);
-        }
-        Ok(out)
-    }
-
-    /// Derived tags for proofs[1..]; server can avoid storing multiple keys.
-    pub fn derived_tags(&self) -> Vec<[u8; 32]> {
-        if self.proofs.len() <= 1 {
-            return Vec::new();
-        }
-        derive_replay_tags(&self.base_tag, self.proofs.len() - 1)
-    }
-}
-
-/// Build EquiX challenge bytes from an application‑defined seed and a `work_nonce`.
-///
-/// Recommendation: let `seed = SHA256("rspow:equix:v1|" || encode(server_nonce) || encode(data))`.
-/// Then reuse `seed` across attempts and only vary `work_nonce` per try.
-pub fn equix_challenge(seed: &[u8], work_nonce: u64) -> Vec<u8> {
-    let mut ch = Vec::with_capacity(seed.len() + 8);
-    ch.extend_from_slice(seed);
-    ch.extend_from_slice(&work_nonce.to_le_bytes());
-    ch
-}
-
-/// Verify a single EquiX proof and return `sha256(solution_bytes)` if valid.
-///
-/// This is an O(1) verification path: it does not try to solve EquiX.
-pub fn equix_verify_solution(seed: &[u8], proof: &EquixProof) -> Result<[u8; 32], String> {
-    let challenge = equix_challenge(seed, proof.work_nonce);
-    equix_crate::verify_bytes(&challenge, &proof.solution.0).map_err(|e| e.to_string())?;
-    let mut hasher = Sha256::new();
-    hasher.update(proof.solution.0);
-    let h = hasher.finalize();
-    Ok(h.into())
-}
-
-/// Verify that the proof meets a leading‑zero‑bits difficulty.
-pub fn equix_check_bits(seed: &[u8], proof: &EquixProof, bits: u32) -> Result<bool, String> {
-    let hash = equix_verify_solution(seed, proof)?;
-    Ok(meets_leading_zero_bits(&hash, bits))
-}
-
-/// Solve EquiX by varying `work_nonce`, returning the first proof meeting `bits`.
-///
-/// This is the client‑side search routine. It skips challenges that construct/solve with
-/// zero solutions and continues with the next `work_nonce`.
-pub fn equix_solve_with_bits(
-    seed: &[u8],
-    bits: u32,
-    start_work_nonce: u64,
-) -> Result<(EquixProof, [u8; 32]), String> {
-    let mut work_nonce = start_work_nonce;
-    loop {
-        let challenge = equix_challenge(seed, work_nonce);
-        // Build EquiX; on rare constraint errors, skip to next work_nonce.
-        let equix = match equix_crate::EquiX::new(&challenge) {
-            Ok(e) => e,
-            Err(_) => {
-                work_nonce = work_nonce
-                    .checked_add(1)
-                    .ok_or_else(|| "work_nonce overflow".to_owned())?;
-                continue;
-            }
-        };
-        let solutions = equix.solve();
-        for sol in solutions.iter() {
-            let bytes = sol.to_bytes();
-            let mut hasher = Sha256::new();
-            hasher.update(bytes);
-            let hash: [u8; 32] = hasher.finalize().into();
-            if meets_leading_zero_bits(&hash, bits) {
-                let proof = EquixProof {
-                    work_nonce,
-                    solution: EquixSolution(bytes),
-                };
-                return Ok((proof, hash));
-            }
-        }
-        work_nonce = work_nonce
-            .checked_add(1)
-            .ok_or_else(|| "work_nonce overflow".to_owned())?;
-    }
-}
-
-/// Parallel EquiX solve: collect up to `hits` proofs using `threads` workers, varying `work_nonce`.
-#[allow(clippy::type_complexity)]
-pub fn equix_solve_parallel_hits(
-    seed: &[u8],
-    bits: u32,
-    hits: usize,
-    threads: usize,
-    start_work_nonce: u64,
-) -> Result<Vec<(EquixProof, [u8; 32])>, String> {
-    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-    use std::sync::{Arc, Mutex};
-    use std::thread;
-
-    if threads == 0 || hits == 0 {
-        return Err("threads and hits must be >= 1".to_owned());
-    }
-    let seed = seed.to_vec();
-    let next_wn = Arc::new(AtomicU64::new(start_work_nonce));
-    let found = Arc::new(AtomicUsize::new(0));
-    let stop = Arc::new(AtomicBool::new(false));
-    let out: Arc<Mutex<Vec<(EquixProof, [u8; 32])>>> =
-        Arc::new(Mutex::new(Vec::with_capacity(hits)));
-
-    let mut joins = Vec::with_capacity(threads);
-    for _ in 0..threads {
-        let seed_t = seed.clone();
-        let next_t = next_wn.clone();
-        let found_t = found.clone();
-        let stop_t = stop.clone();
-        let out_t = out.clone();
-        let j = thread::spawn(move || {
-            loop {
-                if stop_t.load(Ordering::Relaxed) {
-                    break;
-                }
-                let wn = next_t.fetch_add(1, Ordering::Relaxed);
-                let challenge = equix_challenge(&seed_t, wn);
-                let eq = match equix_crate::EquiX::new(&challenge) {
-                    Ok(e) => e,
-                    Err(_) => continue,
-                };
-                let sols = eq.solve();
-                for sol in sols.iter() {
-                    let bytes = sol.to_bytes();
-                    let mut hasher = Sha256::new();
-                    hasher.update(bytes);
-                    let hash: [u8; 32] = hasher.finalize().into();
-                    if meets_leading_zero_bits(&hash, bits) {
-                        let proof = EquixProof {
-                            work_nonce: wn,
-                            solution: EquixSolution(bytes),
-                        };
-                        if let Ok(mut v) = out_t.lock() {
-                            if v.len() < hits {
-                                v.push((proof, hash));
-                                let f = found_t.fetch_add(1, Ordering::SeqCst) + 1;
-                                if f >= hits {
-                                    stop_t.store(true, Ordering::SeqCst);
-                                }
-                            }
-                        }
-                        break; // next work_nonce
-                    }
-                }
-            }
-        });
-        joins.push(j);
-    }
-    for j in joins {
-        let _ = j.join();
-    }
-    let out = out
-        .lock()
-        .map(|v| v.clone())
-        .map_err(|_| "poison".to_owned())?;
-    Ok(out)
-}
-
-/// Derive replay tags from a base tag to avoid storing multiple keys server-side.
-/// If your server has a secret, prefer HMAC(base, idx) at the application layer.
-pub fn derive_replay_tags(base_tag: &[u8; 32], count: usize) -> Vec<[u8; 32]> {
-    let mut v = Vec::with_capacity(count);
-    for i in 1..=count {
-        let mut h = Sha256::new();
-        h.update(b"rspow:replay:v1|");
-        h.update(base_tag);
-        h.update((i as u64).to_le_bytes());
-        v.push(h.finalize().into());
-    }
-    v
-}
-
 // ===== Generic parallel PoW (multi-hit) =====
 
 /// A single PoW hit found by the parallel solver.
@@ -658,7 +458,6 @@ impl ParPowCfg {
 /// Solve a PoW in parallel and collect up to `cfg.hits` distinct nonces that satisfy the difficulty.
 /// Works with any `PoWAlgorithm` and both difficulty modes.
 pub fn pow_solve_parallel_hits(pow: &PoW, cfg: &ParPowCfg) -> Result<Vec<PowHit>, String> {
-    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::thread;
 
@@ -671,9 +470,8 @@ pub fn pow_solve_parallel_hits(pow: &PoW, cfg: &ParPowCfg) -> Result<Vec<PowHit>
         DifficultyMode::AsciiZeroPrefix => Some(pow.calculate_target()),
         DifficultyMode::LeadingZeroBits => None,
     };
-    let next_nonce = Arc::new(AtomicU64::new(cfg.start_nonce));
-    let found = Arc::new(AtomicUsize::new(0));
-    let stop = Arc::new(AtomicBool::new(false));
+    let next_nonce = Arc::new(crate::work::NonceSource::new(cfg.start_nonce));
+    let stop = Arc::new(crate::work::HitStop::new(cfg.hits)?);
     let hits: Arc<Mutex<Vec<PowHit>>> = Arc::new(Mutex::new(Vec::with_capacity(cfg.hits)));
 
     let mut joins = Vec::with_capacity(cfg.threads);
@@ -681,15 +479,14 @@ pub fn pow_solve_parallel_hits(pow: &PoW, cfg: &ParPowCfg) -> Result<Vec<PowHit>
         let pow_t = pow.clone();
         let target_t = target_ascii.clone();
         let next = next_nonce.clone();
-        let found_t = found.clone();
         let stop_t = stop.clone();
         let hits_t = hits.clone();
         let hits_cap = cfg.hits;
         let j = thread::spawn(move || loop {
-            if stop_t.load(Ordering::Relaxed) {
+            if stop_t.should_stop() {
                 break;
             }
-            let n = next.fetch_add(1, Ordering::Relaxed) as usize;
+            let n = next.fetch() as usize;
             let hash_vec = pow_t.algorithm.calculate(&pow_t.data, n);
             let ok = match pow_t.mode {
                 DifficultyMode::AsciiZeroPrefix => {
@@ -709,9 +506,7 @@ pub fn pow_solve_parallel_hits(pow: &PoW, cfg: &ParPowCfg) -> Result<Vec<PowHit>
                             nonce: n as u64,
                             hash: h32,
                         });
-                        let f = found_t.fetch_add(1, Ordering::SeqCst) + 1;
-                        if f >= hits_cap {
-                            stop_t.store(true, Ordering::SeqCst);
+                        if stop_t.record_hit() {
                             break;
                         }
                     }
@@ -816,7 +611,7 @@ impl PoWAlgorithm {
         challenge.extend_from_slice(&nonce.to_le_bytes());
 
         // Instantiate EquiX and solve
-        let equix = match equix_crate::EquiX::new(&challenge) {
+        let equix = match ::equix::EquiX::new(&challenge) {
             Ok(e) => e,
             Err(_) => return vec![0xFFu8; 32],
         };
@@ -1536,7 +1331,7 @@ mod tests {
         let mut found = None;
         for wn in 0u64..64 {
             let challenge = equix_challenge(&seed, wn);
-            if let Ok(eq) = equix_crate::EquiX::new(&challenge) {
+            if let Ok(eq) = ::equix::EquiX::new(&challenge) {
                 let sols = eq.solve();
                 if let Some(sol) = sols.iter().next() {
                     found = Some((wn, EquixSolution(sol.to_bytes())));
@@ -1567,5 +1362,64 @@ mod tests {
         // Tamper one byte in the solution; verify should fail.
         proof.solution.0[0] ^= 0x01;
         assert!(equix_verify_solution(&seed, &proof).is_err());
+    }
+
+    #[test]
+    fn test_equix_parallel_hits_dedup_and_consistent() {
+        let seed = [3u8; 32];
+        let cfg1 = equix::solver::EquixSolveConfig {
+            threads: 1,
+            hits: 3,
+            start_work_nonce: 0,
+        };
+        let cfg2 = equix::solver::EquixSolveConfig {
+            threads: 2,
+            hits: 3,
+            start_work_nonce: 0,
+        };
+        let h1 = equix::solver::equix_solve_parallel_hits_cfg(&seed, 0, &cfg1).unwrap();
+        let h2 = equix::solver::equix_solve_parallel_hits_cfg(&seed, 0, &cfg2).unwrap();
+        let set1: std::collections::HashSet<_> = h1
+            .iter()
+            .map(|h| (h.proof.work_nonce, h.proof.solution.0))
+            .collect();
+        let set2: std::collections::HashSet<_> = h2
+            .iter()
+            .map(|h| (h.proof.work_nonce, h.proof.solution.0))
+            .collect();
+        assert_eq!(set1.len(), cfg1.hits);
+        assert_eq!(set2.len(), cfg2.hits);
+        assert_eq!(set1, set2);
+    }
+
+    #[test]
+    fn test_equix_bundle_rejects_duplicates() {
+        let seed = [7u8; 32];
+        let (proof, _hash) = equix_solve_with_bits(&seed, 0, 0).expect("solve");
+        let bundle = EquixProofBundle {
+            base_tag: [0u8; 32],
+            proofs: vec![proof.clone(), proof],
+        };
+        assert!(bundle.verify_all(&seed, 0).is_err());
+    }
+
+    #[test]
+    fn test_equix_stream_yields_requested_hits() {
+        let seed = [11u8; 32];
+        let cfg = equix::solver::EquixSolveConfig {
+            threads: 2,
+            hits: 2,
+            start_work_nonce: 0,
+        };
+        let solver = EquixSolver::new(&seed, 0);
+        let stream = solver.solve_stream(cfg).expect("stream");
+        let mut seen = std::collections::HashSet::new();
+        let mut count = 0;
+        while let Some(hit) = stream.recv() {
+            seen.insert((hit.proof.work_nonce, hit.proof.solution.0));
+            count += 1;
+        }
+        assert_eq!(count, 2);
+        assert_eq!(seen.len(), 2);
     }
 }
