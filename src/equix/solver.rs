@@ -2,13 +2,12 @@ use super::types::{EquixHit, EquixProof, EquixSolution};
 use crate::work::{HitStop, NonceSource};
 use crate::{meets_leading_zero_bits, DifficultyMode};
 use equix as equix_crate;
+use flume::TrySendError;
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
-
-type DedupSet = Arc<Mutex<HashSet<(u64, [u8; 16])>>>;
 
 /// Build EquiX challenge bytes from an application‑defined seed and a `work_nonce`.
 ///
@@ -148,16 +147,15 @@ pub fn equix_solve_parallel_hits_cfg(
     let seed = seed.to_vec();
     let nonce_src = Arc::new(NonceSource::new(cfg.start_work_nonce));
     let stop = Arc::new(HitStop::new(cfg.hits)?);
-    let hits: Arc<Mutex<Vec<EquixHit>>> = Arc::new(Mutex::new(Vec::with_capacity(cfg.hits)));
-    let dedup: DedupSet = Arc::new(Mutex::new(HashSet::with_capacity(cfg.hits * 2)));
+    let bound = (cfg.threads.max(1) * 4).max(cfg.hits);
+    let (tx, rx) = flume::bounded::<(u64, [u8; 16], [u8; 32])>(bound);
 
     let mut joins = Vec::with_capacity(cfg.threads);
     for _ in 0..cfg.threads {
         let seed_t = seed.clone();
         let nonce_t = nonce_src.clone();
         let stop_t = stop.clone();
-        let hits_t = hits.clone();
-        let dedup_t = dedup.clone();
+        let tx_t = tx.clone();
         let j = thread::spawn(move || {
             while !stop_t.should_stop() {
                 let wn = nonce_t.fetch();
@@ -173,50 +171,48 @@ pub fn equix_solve_parallel_hits_cfg(
                     hasher.update(bytes);
                     let hash: [u8; 32] = hasher.finalize().into();
                     if meets_leading_zero_bits(&hash, bits) {
-                        let key = (wn, bytes);
-                        if let Ok(mut seen) = dedup_t.lock() {
-                            if !seen.insert(key) {
-                                continue;
+                        match tx_t.try_send((wn, bytes, hash)) {
+                            Ok(_) => {}
+                            Err(TrySendError::Full(_)) => {
+                                // backpressure: drop this hit and continue searching
                             }
-                        } else {
-                            stop_t.force_stop();
-                            break;
-                        }
-                        let hit = EquixHit {
-                            proof: EquixProof {
-                                work_nonce: wn,
-                                solution: EquixSolution(bytes),
-                            },
-                            hash,
-                        };
-                        if let Ok(mut v) = hits_t.lock() {
-                            if v.len() < stop_t.limit() {
-                                v.push(hit);
-                                if stop_t.record_hit() {
-                                    break;
-                                }
+                            Err(TrySendError::Disconnected(_)) => {
+                                stop_t.force_stop();
+                                return;
                             }
-                        } else {
-                            stop_t.force_stop();
-                            break;
                         }
-                        break; // proceed to next work_nonce
+                        break;
                     }
                 }
             }
         });
         joins.push(j);
     }
+    drop(tx);
+
+    let mut hits = Vec::with_capacity(cfg.hits);
+    let mut seen = HashSet::with_capacity(cfg.hits * 2);
+    while let Ok((wn, bytes, hash)) = rx.recv() {
+        if !seen.insert((wn, bytes)) {
+            continue;
+        }
+        hits.push(EquixHit {
+            proof: EquixProof {
+                work_nonce: wn,
+                solution: EquixSolution(bytes),
+            },
+            hash,
+        });
+        if stop.record_hit() {
+            break;
+        }
+    }
+    stop.force_stop();
     for j in joins {
         let _ = j.join();
     }
-    let mut out = hits
-        .lock()
-        .map(|v| v.clone())
-        .map_err(|_| "poison".to_owned())?;
-    // Deterministic ordering for callers/tests.
-    out.sort_by_key(|h| (h.proof.work_nonce, h.proof.solution.0));
-    Ok(out)
+    hits.sort_by_key(|h| (h.proof.work_nonce, h.proof.solution.0));
+    Ok(hits)
 }
 
 /// Backwards-compatible signature: matches earlier API.
@@ -248,15 +244,16 @@ pub fn equix_solve_stream(
     }
     let nonce_src = Arc::new(NonceSource::new(cfg.start_work_nonce));
     let stop = Arc::new(HitStop::new(cfg.hits)?);
-    let dedup: DedupSet = Arc::new(Mutex::new(HashSet::with_capacity(cfg.hits * 2)));
-    let (tx, rx) = mpsc::channel::<EquixHit>();
+    let bound = (cfg.threads.max(1) * 4).max(cfg.hits);
+    let (tx, rx) = flume::bounded::<EquixHit>(bound);
+    let dedup = Arc::new(std::sync::Mutex::new(HashSet::with_capacity(cfg.hits * 2)));
     let mut joins = Vec::with_capacity(cfg.threads);
     for _ in 0..cfg.threads {
         let seed_t = seed.clone();
         let nonce_t = nonce_src.clone();
         let stop_t = stop.clone();
-        let dedup_t = dedup.clone();
         let tx_t = tx.clone();
+        let dedup_t = dedup.clone();
         let j = thread::spawn(move || {
             while !stop_t.should_stop() {
                 let wn = nonce_t.fetch();
@@ -272,6 +269,7 @@ pub fn equix_solve_stream(
                     hasher.update(bytes);
                     let hash: [u8; 32] = hasher.finalize().into();
                     if meets_leading_zero_bits(&hash, bits) {
+                        // global dedup for stream
                         let key = (wn, bytes);
                         if let Ok(mut seen) = dedup_t.lock() {
                             if !seen.insert(key) {
@@ -281,9 +279,6 @@ pub fn equix_solve_stream(
                             stop_t.force_stop();
                             break;
                         }
-                        if stop_t.should_stop() {
-                            break;
-                        }
                         let hit = EquixHit {
                             proof: EquixProof {
                                 work_nonce: wn,
@@ -291,17 +286,15 @@ pub fn equix_solve_stream(
                             },
                             hash,
                         };
-                        let reached = stop_t.record_hit();
-                        if reached && stop_t.found() > stop_t.limit() {
-                            break;
+                        match tx_t.try_send(hit) {
+                            Ok(_) => {}
+                            Err(TrySendError::Full(_)) => {}
+                            Err(TrySendError::Disconnected(_)) => {
+                                stop_t.force_stop();
+                                return;
+                            }
                         }
-                        if tx_t.send(hit).is_err() {
-                            stop_t.force_stop();
-                            break;
-                        }
-                        if reached {
-                            break;
-                        }
+                        let _ = stop_t.record_hit();
                         break; // next work_nonce
                     }
                 }
@@ -309,8 +302,13 @@ pub fn equix_solve_stream(
         });
         joins.push(j);
     }
-    drop(tx); // Drop the extra sender in this scope
-    Ok(EquixHitStream { rx, stop, joins })
+    drop(tx);
+    Ok(EquixHitStream {
+        rx,
+        stop,
+        joins,
+        remaining: std::sync::atomic::AtomicUsize::new(cfg.hits),
+    })
 }
 
 /// Build a bundle directly from hits, keeping caller-facing API ergonomic.
@@ -334,20 +332,41 @@ pub fn equix_solve_bundle(
 
 /// Streaming receiver for EquiX hits; join handles are awaited on drop.
 pub struct EquixHitStream {
-    rx: mpsc::Receiver<EquixHit>,
+    rx: flume::Receiver<EquixHit>,
     stop: Arc<HitStop>,
     joins: Vec<thread::JoinHandle<()>>,
+    remaining: std::sync::atomic::AtomicUsize,
 }
 
 impl EquixHitStream {
     /// Blocking receive; returns `None` when stream is closed.
     pub fn recv(&self) -> Option<EquixHit> {
-        self.rx.recv().ok()
+        if self.remaining.load(std::sync::atomic::Ordering::Relaxed) == 0 {
+            return None;
+        }
+        match self.rx.recv() {
+            Ok(hit) => {
+                self.remaining
+                    .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                Some(hit)
+            }
+            Err(_) => None,
+        }
     }
 
     /// Non-blocking receive with timeout to avoid busy wait in hosts that prefer it.
     pub fn recv_timeout(&self, timeout: Duration) -> Option<EquixHit> {
-        self.rx.recv_timeout(timeout).ok()
+        if self.remaining.load(std::sync::atomic::Ordering::Relaxed) == 0 {
+            return None;
+        }
+        match self.rx.recv_timeout(timeout) {
+            Ok(hit) => {
+                self.remaining
+                    .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                Some(hit)
+            }
+            Err(_) => None,
+        }
     }
 
     /// Number of hits already recorded globally.

@@ -2,11 +2,11 @@ use serde::{Deserialize, Serialize};
 use std::hash::{Hash, Hasher};
 
 /// 16-byte EquiX solution wrapper for type safety.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct EquixSolution(pub [u8; 16]);
 
 /// A single EquiX proof (work_nonce + solution bytes).
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct EquixProof {
     pub work_nonce: u64,
     /// Concrete EquiX solution bytes; verifier checks with `equix::verify_bytes`.

@@ -72,11 +72,6 @@ impl HitStop {
     pub fn found(&self) -> usize {
         self.found.load(Ordering::Relaxed)
     }
-
-    /// Configured limit.
-    pub fn limit(&self) -> usize {
-        self.limit
-    }
 }
 
 #[cfg(test)]
