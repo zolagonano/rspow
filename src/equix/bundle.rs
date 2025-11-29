@@ -28,6 +28,23 @@ impl EquixProofBundle {
         Ok(out)
     }
 
+    /// Verify proofs and stop at first failure or duplication.
+    ///
+    /// Useful for server-side intake: avoids wasted cycles once an invalid element is found.
+    pub fn verify_strict(&self, seed: &[u8], bits: u32) -> Result<(), String> {
+        let mut seen = HashSet::with_capacity(self.proofs.len());
+        for (idx, p) in self.proofs.iter().enumerate() {
+            if !seen.insert((p.work_nonce, p.solution.0)) {
+                return Err(format!("duplicate EquiX proof at index {idx}"));
+            }
+            let ok = crate::equix_check_bits(seed, p, bits)?;
+            if !ok {
+                return Err(format!("proof at index {idx} fails difficulty"));
+            }
+        }
+        Ok(())
+    }
+
     /// Derived tags for proofs[1..]; server can avoid storing multiple keys.
     pub fn derived_tags(&self) -> Vec<[u8; 32]> {
         if self.proofs.len() <= 1 {

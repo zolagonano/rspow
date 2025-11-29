@@ -211,6 +211,30 @@ pub fn equix_solve_parallel_hits_cfg(
     Ok(hits)
 }
 
+/// Convenience: solve and return a bundle, generating `base_tag` from the first hit.
+pub fn equix_solve_bundle_auto(
+    seed: &[u8],
+    bits: u32,
+    cfg: &EquixSolveConfig,
+) -> Result<super::bundle::EquixProofBundle, String> {
+    let hits = equix_solve_parallel_hits_cfg(seed, bits, cfg)?;
+    if hits.is_empty() {
+        return Err("no hits found".to_owned());
+    }
+    let base_tag = default_base_tag(seed, &hits[0].proof);
+    equix_solve_bundle(seed, bits, cfg, base_tag, hits)
+}
+
+/// Generate a default base_tag for replay protection.
+pub fn default_base_tag(seed: &[u8], proof: &EquixProof) -> [u8; 32] {
+    let mut h = Sha256::new();
+    h.update(b"rspow:equix:tag:v1|");
+    h.update(seed);
+    h.update(proof.work_nonce.to_le_bytes());
+    h.update(proof.solution.0);
+    h.finalize().into()
+}
+
 /// Backwards-compatible signature: matches earlier API.
 #[allow(clippy::type_complexity)]
 pub fn equix_solve_parallel_hits(

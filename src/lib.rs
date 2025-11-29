@@ -40,9 +40,10 @@ pub mod equix;
 mod work;
 
 pub use equix::{
-    equix_challenge, equix_check_bits, equix_solve_bundle, equix_solve_parallel_hits,
-    equix_solve_with_bits, equix_verify_solution, EquixHit, EquixProof, EquixProofBundle,
-    EquixSolution, EquixSolveConfig, EquixSolver,
+    default_base_tag, equix_challenge, equix_check_bits, equix_solve_bundle,
+    equix_solve_bundle_auto, equix_solve_parallel_hits, equix_solve_with_bits,
+    equix_verify_solution, EquixHit, EquixProof, EquixProofBundle, EquixSolution, EquixSolveConfig,
+    EquixSolver,
 };
 
 // Expose KPoW (k puzzles with worker pool) utilities.
@@ -1390,6 +1391,39 @@ mod tests {
         assert_eq!(set1.len(), cfg1.hits);
         assert_eq!(set2.len(), cfg2.hits);
         assert_eq!(set1, set2);
+    }
+
+    #[test]
+    fn test_equix_solve_bundle_auto_and_verify_strict() {
+        let seed = [5u8; 32];
+        let cfg = equix::solver::EquixSolveConfig {
+            threads: 2,
+            hits: 2,
+            start_work_nonce: 0,
+        };
+        let bundle = equix_solve_bundle_auto(&seed, 0, &cfg).expect("bundle");
+        bundle.verify_strict(&seed, 0).expect("strict verify");
+        assert_eq!(bundle.proofs.len(), 2);
+    }
+
+    #[test]
+    fn test_equix_verify_strict_stops_on_error() {
+        let seed = [9u8; 32];
+        let (proof, _hash) = equix_solve_with_bits(&seed, 0, 0).expect("solve");
+        let bundle = EquixProofBundle {
+            base_tag: [0u8; 32],
+            proofs: vec![proof, proof],
+        };
+        let err = bundle.verify_strict(&seed, 0).unwrap_err();
+        assert!(err.contains("duplicate"));
+        // Tamper and ensure it errors too (duplicate removed to hit difficulty path)
+        let mut bundle2 = EquixProofBundle {
+            base_tag: [0u8; 32],
+            proofs: vec![proof],
+        };
+        bundle2.proofs[0].solution.0[0] ^= 1;
+        let err2 = bundle2.verify_strict(&seed, 0).unwrap_err();
+        assert!(!err2.is_empty());
     }
 
     #[test]
