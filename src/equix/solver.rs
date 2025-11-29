@@ -144,22 +144,18 @@ pub fn equix_solve_parallel_hits_cfg(
     if cfg.threads == 0 || cfg.hits == 0 {
         return Err("threads and hits must be >= 1".to_owned());
     }
-    let seed = seed.to_vec();
-    let nonce_src = Arc::new(NonceSource::new(cfg.start_work_nonce));
-    let stop = Arc::new(HitStop::new(cfg.hits)?);
+    let seed_vec = seed.to_vec();
     let bound = (cfg.threads.max(1) * 4).max(cfg.hits);
     let (tx, rx) = flume::bounded::<(u64, [u8; 16], [u8; 32])>(bound);
+    let ctx = WorkerCtx::new(seed_vec, cfg, tx.clone())?;
 
     let mut joins = Vec::with_capacity(cfg.threads);
     for _ in 0..cfg.threads {
-        let seed_t = seed.clone();
-        let nonce_t = nonce_src.clone();
-        let stop_t = stop.clone();
-        let tx_t = tx.clone();
+        let ctx_t = ctx.clone();
         let j = thread::spawn(move || {
-            while !stop_t.should_stop() {
-                let wn = nonce_t.fetch();
-                let challenge = equix_challenge(&seed_t, wn);
+            while !ctx_t.stop.should_stop() {
+                let wn = ctx_t.nonce.fetch();
+                let challenge = equix_challenge(&ctx_t.seed, wn);
                 let eq = match equix_crate::EquiX::new(&challenge) {
                     Ok(e) => e,
                     Err(_) => continue,
@@ -171,13 +167,13 @@ pub fn equix_solve_parallel_hits_cfg(
                     hasher.update(bytes);
                     let hash: [u8; 32] = hasher.finalize().into();
                     if meets_leading_zero_bits(&hash, bits) {
-                        match tx_t.try_send((wn, bytes, hash)) {
+                        match ctx_t.tx.try_send((wn, bytes, hash)) {
                             Ok(_) => {}
                             Err(TrySendError::Full(_)) => {
                                 // backpressure: drop this hit and continue searching
                             }
                             Err(TrySendError::Disconnected(_)) => {
-                                stop_t.force_stop();
+                                ctx_t.stop.force_stop();
                                 return;
                             }
                         }
@@ -203,11 +199,11 @@ pub fn equix_solve_parallel_hits_cfg(
             },
             hash,
         });
-        if stop.record_hit() {
+        if ctx.stop.record_hit() {
             break;
         }
     }
-    stop.force_stop();
+    ctx.stop.force_stop();
     for j in joins {
         let _ = j.join();
     }
@@ -242,14 +238,15 @@ pub fn equix_solve_stream(
     if cfg.threads == 0 || cfg.hits == 0 {
         return Err("threads and hits must be >= 1".to_owned());
     }
-    let nonce_src = Arc::new(NonceSource::new(cfg.start_work_nonce));
-    let stop = Arc::new(HitStop::new(cfg.hits)?);
+    let seed_vec = seed.to_vec();
     let bound = (cfg.threads.max(1) * 4).max(cfg.hits);
     let (tx, rx) = flume::bounded::<EquixHit>(bound);
+    let stop = Arc::new(HitStop::new(cfg.hits)?);
+    let nonce_src = Arc::new(NonceSource::new(cfg.start_work_nonce));
     let dedup = Arc::new(std::sync::Mutex::new(HashSet::with_capacity(cfg.hits * 2)));
     let mut joins = Vec::with_capacity(cfg.threads);
     for _ in 0..cfg.threads {
-        let seed_t = seed.clone();
+        let seed_t = seed_vec.clone();
         let nonce_t = nonce_src.clone();
         let stop_t = stop.clone();
         let tx_t = tx.clone();
@@ -387,4 +384,26 @@ impl Drop for EquixHitStream {
 /// Validate that EquiX always operates in leading-zero-bits mode.
 pub const fn equix_difficulty_mode() -> DifficultyMode {
     DifficultyMode::LeadingZeroBits
+}
+#[derive(Clone)]
+struct WorkerCtx {
+    seed: Arc<Vec<u8>>,
+    nonce: Arc<NonceSource>,
+    stop: Arc<HitStop>,
+    tx: flume::Sender<(u64, [u8; 16], [u8; 32])>,
+}
+
+impl WorkerCtx {
+    fn new(
+        seed: Vec<u8>,
+        cfg: &EquixSolveConfig,
+        tx: flume::Sender<(u64, [u8; 16], [u8; 32])>,
+    ) -> Result<Self, String> {
+        Ok(Self {
+            seed: Arc::new(seed),
+            nonce: Arc::new(NonceSource::new(cfg.start_work_nonce)),
+            stop: Arc::new(HitStop::new(cfg.hits)?),
+            tx,
+        })
+    }
 }
