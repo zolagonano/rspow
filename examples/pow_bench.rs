@@ -156,36 +156,35 @@ fn main() -> Result<(), String> {
                     return Err("equix bench currently supports --mode bits only".into());
                 }
                 let bits = difficulty as u32;
-                let mut work = start_work_nonce;
                 let t0 = Instant::now();
-                let mut found_hash_hex: Option<String> = None;
-                let mut found_work: Option<u64> = None;
                 let mut tries = 0u128;
-                'outer: loop {
+                let (found_work, found_hash_hex) = loop {
+                    let work = start_work_nonce + tries as u64;
                     let challenge = equix_challenge(&seed, work);
                     let eq = match equix::EquiX::new(&challenge) {
                         Ok(e) => e,
                         Err(_) => {
-                            work += 1;
                             tries += 1;
                             continue;
                         }
                     };
                     let sols = eq.solve();
+                    let mut hit: Option<(u64, String)> = None;
                     for sol in sols.iter() {
                         let bytes = sol.to_bytes();
                         let mut hasher = Sha256::new();
                         hasher.update(bytes);
                         let hash: [u8; 32] = hasher.finalize().into();
                         if meets_leading_zero_bits(&hash, bits) {
-                            found_hash_hex = Some(hex_encode(hash));
-                            found_work = Some(work);
-                            break 'outer;
+                            hit = Some((work, hex_encode(hash)));
+                            break;
                         }
                     }
-                    work += 1;
+                    if let Some(h) = hit {
+                        break h;
+                    }
                     tries += 1;
-                }
+                };
                 let dt_ms = t0.elapsed().as_millis();
                 println!(
                     "run,{},{},{},{},{},{},{},{},{}",
@@ -196,8 +195,8 @@ fn main() -> Result<(), String> {
                     run_idx,
                     dt_ms,
                     tries,
-                    found_work.expect("work"),
-                    found_hash_hex.expect("hash")
+                    found_work,
+                    found_hash_hex
                 );
                 times.push(dt_ms);
                 tries_all.push(tries);
