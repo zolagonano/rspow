@@ -1,7 +1,8 @@
-# EquiX Multi-thread & Bundle Improvements
-
-- [x] Document a clear seed/anti-replay protocol (server nonce + client work nonce), mandate `LeadingZeroBits`, and expose it via official sdk && doc so integrators don’t guess.
-- [x] Deduplicate EquiX hits (work_nonce, solution/tag) both during parallel collection and inside `EquixProofBundle::verify_all` to block duplicates and skewed stats.
-- [x] Add property/concurrency tests: single vs multi-thread hit sets match; tampered `base_tag`/derived tags or duplicated proofs fail verification.
-- [x] Provide a higher-level EquiX solver API that can stream hits and emit an `EquixProofBundle` directly, reducing caller assembly mistakes.
-- [x] Share a common nonce dispatcher/early-stop workflow between EquiX and `kpow` to avoid divergent thread logic and simplify maintenance.
+- [ ] Scaffold new EquiX-only crate structure per docs/equix_rewrite_plan.md (engine/core/types/verify/error/stream modules).
+- [ ] Define PowEngine trait with solve_bundle/resume signatures using fixed [u8;32] challenge.
+- [ ] Implement EquixEngineBuilder (derive_builder) and EquixEngine fields: bits, threads, required_proofs, progress (Arc<AtomicU64>), hasher (default BLAKE3).
+- [ ] Implement deterministic challenge derivation (TagHasher) and EquiX solving pipeline: worker pool, flume channel, NonceSource, stop flag, dedup.
+- [ ] Implement Proof/ProofBundle types with insert_proof (dedup), verify_strict (short-circuit), carrying master_challenge.
+- [ ] Implement resume: continue from existing ProofBundle to higher required_proofs without duplicating prior proofs.
+- [ ] Implement strict verification errors and minimal solve errors; wire progress increments and exact stop.
+- [ ] Add tests: determinism, verify_strict dup/tamper, single vs multi-thread equivalence, resume N->N+M, required_proofs=1.
