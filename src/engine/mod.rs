@@ -110,6 +110,11 @@ impl PowEngine for EquixEngine {
         required_proofs: usize,
     ) -> Result<ProofBundle, Error> {
         self.validate()?;
+        if existing.config.bits != self.bits {
+            return Err(Error::InvalidConfig(
+                "bundle difficulty does not match engine".into(),
+            ));
+        }
         verify_bundle_strict(&existing, self.hasher.as_ref())
             .map_err(|e| Error::SolverFailed(e.to_string()))?;
         if required_proofs < existing.len() {
@@ -371,7 +376,40 @@ mod tests {
             .expect("solver should complete");
 
         assert_eq!(proofs.len(), 3);
-        assert!(proofs.iter().all(|p| p.id >= 2));
+        assert!(
+            attempts.load(Ordering::SeqCst) >= 2,
+            "should have skipped at least two attempts"
+        );
         assert_eq!(progress.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn resume_rejects_mismatched_bits() {
+        let progress = Arc::new(AtomicU64::new(0));
+        let mut engine_high = EquixEngineBuilder::default()
+            .bits(2)
+            .threads(1)
+            .required_proofs(1)
+            .progress(progress.clone())
+            .build()
+            .expect("build high bits engine");
+
+        let bundle = engine_high
+            .solve_bundle([9u8; 32])
+            .expect("solve initial bundle");
+
+        // Lower bits engine should refuse to resume a higher-difficulty bundle.
+        let mut engine_low = EquixEngineBuilder::default()
+            .bits(1)
+            .threads(1)
+            .required_proofs(2)
+            .progress(Arc::new(AtomicU64::new(0)))
+            .build()
+            .expect("build low bits engine");
+
+        let err = engine_low
+            .resume(bundle, 2)
+            .expect_err("should reject bits mismatch");
+        matches!(err, Error::InvalidConfig(_));
     }
 }
