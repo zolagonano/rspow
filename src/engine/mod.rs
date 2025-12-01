@@ -91,6 +91,7 @@ impl PowEngine for EquixEngine {
             self.bits,
             self.threads,
             0,
+            0,
             self.required_proofs,
             self.progress.clone(),
         )?;
@@ -127,11 +128,19 @@ impl PowEngine for EquixEngine {
         if existing.len() >= required_proofs {
             return Ok(existing);
         }
+        let start_nonce = existing
+            .proofs
+            .iter()
+            .map(|p| p.id)
+            .max()
+            .map(|m| m.saturating_add(1))
+            .unwrap_or(existing.len());
         let new_proofs = solve_range(
             self.hasher.clone(),
             existing.master_challenge,
             self.bits,
             self.threads,
+            start_nonce,
             existing.len(),
             required_proofs,
             self.progress.clone(),
@@ -146,32 +155,24 @@ impl PowEngine for EquixEngine {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn solve_range(
     hasher: Arc<dyn TagHasher>,
     master_challenge: [u8; 32],
     bits: u32,
     threads: usize,
-    start_id: usize,
+    start_nonce: usize,
+    current_len: usize,
     target_total: usize,
     progress: Arc<AtomicU64>,
 ) -> Result<Vec<Proof>, Error> {
-    if start_id > target_total {
-        return Err(Error::InvalidConfig(
-            "start id must not exceed required proofs".into(),
-        ));
-    }
-
-    let needed = target_total.saturating_sub(start_id);
-    if needed == 0 {
-        return Ok(Vec::new());
-    }
-
     solve_range_with(
         hasher,
         master_challenge,
         bits,
         threads,
-        start_id,
+        start_nonce,
+        current_len,
         target_total,
         progress,
         Arc::new(solve_single as fn([u8; 32], u32) -> Result<Option<[u8; 16]>, Error>),
@@ -184,23 +185,24 @@ fn solve_range_with(
     master_challenge: [u8; 32],
     bits: u32,
     threads: usize,
-    start_id: usize,
+    start_nonce: usize,
+    current_len: usize,
     target_total: usize,
     progress: Arc<AtomicU64>,
     solver: Arc<Solver>,
 ) -> Result<Vec<Proof>, Error> {
-    if start_id > target_total {
+    if current_len > target_total {
         return Err(Error::InvalidConfig(
-            "start id must not exceed required proofs".into(),
+            "current proof count exceeds required proofs".into(),
         ));
     }
 
-    let needed = target_total.saturating_sub(start_id);
+    let needed = target_total.saturating_sub(current_len);
     if needed == 0 {
         return Ok(Vec::new());
     }
 
-    let nonce_source = Arc::new(NonceSource::new(start_id as u64));
+    let nonce_source = Arc::new(NonceSource::new(start_nonce as u64));
     let stop = Arc::new(StopFlag::new());
     let bound = (threads.max(1) * 2).max(1);
     let (tx, rx): (Sender<ProofResult>, Receiver<ProofResult>) = flume::bounded(bound);
@@ -372,7 +374,7 @@ mod tests {
             })
         };
 
-        let proofs = solve_range_with(hasher, [1u8; 32], 0, 2, 0, 3, progress.clone(), solver)
+        let proofs = solve_range_with(hasher, [1u8; 32], 0, 2, 0, 0, 3, progress.clone(), solver)
             .expect("solver should complete");
 
         assert_eq!(proofs.len(), 3);
@@ -381,6 +383,39 @@ mod tests {
             "should have skipped at least two attempts"
         );
         assert_eq!(progress.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn resume_starts_from_next_nonce() {
+        let progress = Arc::new(AtomicU64::new(0));
+        let hasher = Arc::new(Blake3TagHasher);
+        let master = [7u8; 32];
+
+        // Build an existing bundle with a non-zero starting nonce (5).
+        let existing_proofs = solve_range(hasher.clone(), master, 1, 1, 5, 0, 1, progress.clone())
+            .expect("seed bundle");
+
+        let bundle = ProofBundle {
+            proofs: existing_proofs,
+            config: ProofConfig { bits: 1 },
+            master_challenge: master,
+        };
+
+        // Resume should not re-use nonce 5; expect ids 5 and >=6 after resume.
+        let mut engine = EquixEngineBuilder::default()
+            .bits(1)
+            .threads(1)
+            .required_proofs(2)
+            .progress(progress.clone())
+            .hasher(hasher)
+            .build()
+            .expect("build engine");
+
+        let resumed = engine.resume(bundle, 2).expect("resume should succeed");
+
+        assert_eq!(resumed.len(), 2);
+        assert!(resumed.proofs.iter().any(|p| p.id == 5));
+        assert!(resumed.proofs.iter().any(|p| p.id >= 6));
     }
 
     #[test]
