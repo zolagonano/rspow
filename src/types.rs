@@ -1,3 +1,4 @@
+use crate::core::TagHasher;
 use crate::error::VerifyError;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -35,5 +36,9 @@ impl ProofBundle {
         self.proofs.push(proof);
         self.proofs.sort_by_key(|p| p.id);
         Ok(())
+    }
+
+    pub fn verify_strict(&self, hasher: &dyn TagHasher) -> Result<(), VerifyError> {
+        crate::verify::verify_bundle_strict(self, hasher)
     }
 }

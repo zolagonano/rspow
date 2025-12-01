@@ -1,5 +1,6 @@
+use crate::core::{self, TagHasher};
+use crate::error::VerifyError;
 use crate::types::{Proof, ProofBundle};
-use crate::{core, error::VerifyError};
 use equix as equix_crate;
 use sha2::{Digest, Sha256};
 
@@ -21,9 +22,12 @@ pub fn verify_proof(proof: &Proof, config_bits: u32) -> Result<(), VerifyError> 
     Ok(())
 }
 
-pub fn verify_bundle_strict(bundle: &ProofBundle) -> Result<(), VerifyError> {
+pub fn verify_bundle_strict(
+    bundle: &ProofBundle,
+    hasher: &dyn TagHasher,
+) -> Result<(), VerifyError> {
     let mut prev_id = None;
-    for proof in &bundle.proofs {
+    for (expected_id, proof) in bundle.proofs.iter().enumerate() {
         if let Some(pid) = prev_id {
             if proof.id == pid {
                 return Err(VerifyError::DuplicateProof);
@@ -32,9 +36,11 @@ pub fn verify_bundle_strict(bundle: &ProofBundle) -> Result<(), VerifyError> {
                 return Err(VerifyError::Malformed);
             }
         }
+        if proof.id != expected_id {
+            return Err(VerifyError::Malformed);
+        }
         prev_id = Some(proof.id);
-        let expected =
-            core::derive_challenge(&core::Blake3TagHasher, bundle.master_challenge, proof.id);
+        let expected = core::derive_challenge(hasher, bundle.master_challenge, proof.id);
         if expected != proof.challenge {
             return Err(VerifyError::Malformed);
         }

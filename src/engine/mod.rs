@@ -1,5 +1,5 @@
 use crate::core::{derive_challenge, Blake3TagHasher, TagHasher};
-use crate::error::{Error, VerifyError};
+use crate::error::Error;
 use crate::stream::{NonceSource, StopFlag};
 use crate::types::{Proof, ProofBundle, ProofConfig};
 use crate::verify::verify_bundle_strict;
@@ -7,8 +7,10 @@ use derive_builder::Builder;
 use equix as equix_crate;
 use sha2::Digest;
 use sha2::Sha256;
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::thread;
 
 pub trait PowEngine {
     fn solve_bundle(&mut self, master_challenge: [u8; 32]) -> Result<ProofBundle, Error>;
@@ -26,8 +28,8 @@ pub struct EquixEngine {
     pub threads: usize,
     pub required_proofs: usize,
     pub progress: Arc<AtomicU64>,
-    #[builder(default = "Box::new(Blake3TagHasher)")]
-    pub hasher: Box<dyn TagHasher>,
+    #[builder(default = "Arc::new(Blake3TagHasher)")]
+    pub hasher: Arc<dyn TagHasher>,
 }
 
 impl EquixEngine {
@@ -72,44 +74,29 @@ impl EquixEngineBuilder {
 impl PowEngine for EquixEngine {
     fn solve_bundle(&mut self, master_challenge: [u8; 32]) -> Result<ProofBundle, Error> {
         self.validate()?;
+        self.progress.store(0, Ordering::SeqCst);
         let mut bundle = ProofBundle {
             proofs: Vec::new(),
             config: ProofConfig { bits: self.bits },
             master_challenge,
         };
-        if self.required_proofs == 0 {
-            return Ok(bundle);
+
+        let new_proofs = solve_range(
+            self.hasher.clone(),
+            master_challenge,
+            self.bits,
+            self.threads,
+            0,
+            self.required_proofs,
+            self.progress.clone(),
+        )?;
+
+        for proof in new_proofs {
+            bundle
+                .insert_proof(proof)
+                .map_err(|err| Error::SolverFailed(err.to_string()))?;
         }
-        let nonce_source = NonceSource::new(0);
-        let stop = StopFlag::new();
-        let required = self.required_proofs;
-        while !stop.should_stop() {
-            let id = nonce_source.fetch() as usize;
-            let challenge = derive_challenge(&*self.hasher, master_challenge, id);
-            match solve_single(challenge, self.bits) {
-                Ok(solution) => {
-                    let proof = Proof {
-                        id,
-                        challenge,
-                        solution,
-                    };
-                    bundle.insert_proof(proof).map_err(|err| match err {
-                        VerifyError::DuplicateProof => {
-                            Error::SolverFailed("duplicate proof".into())
-                        }
-                        VerifyError::InvalidDifficulty => {
-                            Error::SolverFailed("invalid difficulty".into())
-                        }
-                        VerifyError::Malformed => Error::SolverFailed("malformed proof".into()),
-                    })?;
-                    let prev = self.progress.fetch_add(1, Ordering::SeqCst) + 1;
-                    if prev >= required as u64 {
-                        stop.force_stop();
-                    }
-                }
-                Err(err) => return Err(err),
-            }
-        }
+
         Ok(bundle)
     }
 
@@ -119,42 +106,161 @@ impl PowEngine for EquixEngine {
         required_proofs: usize,
     ) -> Result<ProofBundle, Error> {
         self.validate()?;
-        verify_bundle_strict(&existing).map_err(|e| Error::SolverFailed(e.to_string()))?;
+        verify_bundle_strict(&existing, self.hasher.as_ref())
+            .map_err(|e| Error::SolverFailed(e.to_string()))?;
         if required_proofs < existing.len() {
             return Err(Error::InvalidConfig(
                 "required_proofs must be >= existing proofs".into(),
             ));
         }
         self.required_proofs = required_proofs;
-        self.progress
-            .fetch_add(existing.len() as u64, Ordering::SeqCst);
+        self.progress.store(existing.len() as u64, Ordering::SeqCst);
         if existing.len() >= required_proofs {
             return Ok(existing);
         }
-        let nonce_source = NonceSource::new(existing.len() as u64);
-        let stop = StopFlag::new();
-        while existing.len() < required_proofs && !stop.should_stop() {
-            let id = nonce_source.fetch() as usize;
-            let challenge = derive_challenge(&*self.hasher, existing.master_challenge, id);
-            match solve_single(challenge, self.bits) {
-                Ok(solution) => {
-                    let proof = Proof {
-                        id,
-                        challenge,
-                        solution,
-                    };
-                    if let Err(err) = existing.insert_proof(proof) {
-                        return Err(Error::SolverFailed(err.to_string()));
-                    }
-                    let prev = self.progress.fetch_add(1, Ordering::SeqCst) + 1;
-                    if prev >= required_proofs as u64 {
-                        stop.force_stop();
-                    }
-                }
-                Err(err) => return Err(err),
-            }
+        let new_proofs = solve_range(
+            self.hasher.clone(),
+            existing.master_challenge,
+            self.bits,
+            self.threads,
+            existing.len(),
+            required_proofs,
+            self.progress.clone(),
+        )?;
+
+        for proof in new_proofs {
+            existing
+                .insert_proof(proof)
+                .map_err(|err| Error::SolverFailed(err.to_string()))?;
         }
         Ok(existing)
+    }
+}
+
+fn solve_range(
+    hasher: Arc<dyn TagHasher>,
+    master_challenge: [u8; 32],
+    bits: u32,
+    threads: usize,
+    start_id: usize,
+    target_total: usize,
+    progress: Arc<AtomicU64>,
+) -> Result<Vec<Proof>, Error> {
+    if start_id > target_total {
+        return Err(Error::InvalidConfig(
+            "start id must not exceed required proofs".into(),
+        ));
+    }
+
+    let needed = target_total.saturating_sub(start_id);
+    if needed == 0 {
+        return Ok(Vec::new());
+    }
+
+    let nonce_source = Arc::new(NonceSource::new(start_id as u64));
+    let stop = Arc::new(StopFlag::new());
+    let bound = (threads.max(1) * 2).max(1);
+    let (tx, rx) = flume::bounded::<Result<Proof, Error>>(bound);
+    let mut joins = Vec::with_capacity(threads.max(1));
+
+    for _ in 0..threads.max(1) {
+        let worker_hasher = hasher.clone();
+        let worker_nonce = nonce_source.clone();
+        let worker_stop = stop.clone();
+        let worker_tx = tx.clone();
+        let join = thread::spawn(move || {
+            worker_loop(
+                worker_hasher,
+                master_challenge,
+                bits,
+                target_total,
+                worker_nonce,
+                worker_stop,
+                worker_tx,
+            );
+        });
+        joins.push(join);
+    }
+    drop(tx);
+
+    let mut proofs = Vec::with_capacity(needed);
+    let mut seen = HashSet::with_capacity(needed * 2);
+
+    while proofs.len() < needed {
+        match rx.recv() {
+            Ok(Ok(proof)) => {
+                if proof.id >= target_total {
+                    continue;
+                }
+                if !seen.insert(proof.id) {
+                    continue;
+                }
+                proofs.push(proof);
+                let current = progress.fetch_add(1, Ordering::SeqCst) + 1;
+                if current >= target_total as u64 {
+                    stop.force_stop();
+                }
+            }
+            Ok(Err(err)) => {
+                stop.force_stop();
+                join_handles(joins);
+                return Err(err);
+            }
+            Err(_) => break,
+        }
+    }
+
+    stop.force_stop();
+    join_handles(joins);
+
+    if proofs.len() < needed {
+        return Err(Error::ChannelClosed);
+    }
+
+    proofs.sort_by_key(|p| p.id);
+    Ok(proofs)
+}
+
+fn worker_loop(
+    hasher: Arc<dyn TagHasher>,
+    master_challenge: [u8; 32],
+    bits: u32,
+    target_total: usize,
+    nonce_source: Arc<NonceSource>,
+    stop: Arc<StopFlag>,
+    tx: flume::Sender<Result<Proof, Error>>,
+) {
+    while !stop.should_stop() {
+        let id = nonce_source.fetch() as usize;
+        if id >= target_total {
+            stop.force_stop();
+            break;
+        }
+        let challenge = derive_challenge(hasher.as_ref(), master_challenge, id);
+        match solve_single(challenge, bits) {
+            Ok(solution) => {
+                let proof = Proof {
+                    id,
+                    challenge,
+                    solution,
+                };
+                if tx.send(Ok(proof)).is_err() {
+                    stop.force_stop();
+                    break;
+                }
+            }
+            Err(err) => {
+                let _ = tx.send(Err(err));
+                stop.force_stop();
+                break;
+            }
+        }
+    }
+}
+
+fn join_handles(joins: Vec<thread::JoinHandle<()>>) {
+    for handle in joins {
+        let _ = handle.join();
     }
 }
 
