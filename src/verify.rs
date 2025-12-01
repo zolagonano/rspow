@@ -27,7 +27,7 @@ pub fn verify_bundle_strict(
     hasher: &dyn TagHasher,
 ) -> Result<(), VerifyError> {
     let mut prev_id = None;
-    for (expected_id, proof) in bundle.proofs.iter().enumerate() {
+    for proof in &bundle.proofs {
         if let Some(pid) = prev_id {
             if proof.id == pid {
                 return Err(VerifyError::DuplicateProof);
@@ -35,9 +35,6 @@ pub fn verify_bundle_strict(
             if proof.id < pid {
                 return Err(VerifyError::Malformed);
             }
-        }
-        if proof.id != expected_id {
-            return Err(VerifyError::Malformed);
         }
         prev_id = Some(proof.id);
         let expected = core::derive_challenge(hasher, bundle.master_challenge, proof.id);

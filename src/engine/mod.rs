@@ -5,6 +5,7 @@ use crate::types::{Proof, ProofBundle, ProofConfig};
 use crate::verify::verify_bundle_strict;
 use derive_builder::Builder;
 use equix as equix_crate;
+use flume::{Receiver, Sender};
 use sha2::Digest;
 use sha2::Sha256;
 use std::collections::HashSet;
@@ -31,6 +32,9 @@ pub struct EquixEngine {
     #[builder(default = "Arc::new(Blake3TagHasher)")]
     pub hasher: Arc<dyn TagHasher>,
 }
+
+type ProofResult = Result<Proof, Error>;
+type Solver = dyn Fn([u8; 32], u32) -> Result<Option<[u8; 16]>, Error> + Send + Sync;
 
 impl EquixEngine {
     fn validate(&self) -> Result<(), Error> {
@@ -157,10 +161,44 @@ fn solve_range(
         return Ok(Vec::new());
     }
 
+    solve_range_with(
+        hasher,
+        master_challenge,
+        bits,
+        threads,
+        start_id,
+        target_total,
+        progress,
+        Arc::new(solve_single as fn([u8; 32], u32) -> Result<Option<[u8; 16]>, Error>),
+    )
+}
+
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn solve_range_with(
+    hasher: Arc<dyn TagHasher>,
+    master_challenge: [u8; 32],
+    bits: u32,
+    threads: usize,
+    start_id: usize,
+    target_total: usize,
+    progress: Arc<AtomicU64>,
+    solver: Arc<Solver>,
+) -> Result<Vec<Proof>, Error> {
+    if start_id > target_total {
+        return Err(Error::InvalidConfig(
+            "start id must not exceed required proofs".into(),
+        ));
+    }
+
+    let needed = target_total.saturating_sub(start_id);
+    if needed == 0 {
+        return Ok(Vec::new());
+    }
+
     let nonce_source = Arc::new(NonceSource::new(start_id as u64));
     let stop = Arc::new(StopFlag::new());
     let bound = (threads.max(1) * 2).max(1);
-    let (tx, rx) = flume::bounded::<Result<Proof, Error>>(bound);
+    let (tx, rx): (Sender<ProofResult>, Receiver<ProofResult>) = flume::bounded(bound);
     let mut joins = Vec::with_capacity(threads.max(1));
 
     for _ in 0..threads.max(1) {
@@ -168,15 +206,16 @@ fn solve_range(
         let worker_nonce = nonce_source.clone();
         let worker_stop = stop.clone();
         let worker_tx = tx.clone();
+        let worker_solver = solver.clone();
         let join = thread::spawn(move || {
             worker_loop(
                 worker_hasher,
                 master_challenge,
                 bits,
-                target_total,
                 worker_nonce,
                 worker_stop,
                 worker_tx,
+                worker_solver,
             );
         });
         joins.push(join);
@@ -184,14 +223,11 @@ fn solve_range(
     drop(tx);
 
     let mut proofs = Vec::with_capacity(needed);
-    let mut seen = HashSet::with_capacity(needed * 2);
+    let mut seen = HashSet::with_capacity(needed * 2 + 1);
 
     while proofs.len() < needed {
         match rx.recv() {
             Ok(Ok(proof)) => {
-                if proof.id >= target_total {
-                    continue;
-                }
                 if !seen.insert(proof.id) {
                     continue;
                 }
@@ -225,20 +261,16 @@ fn worker_loop(
     hasher: Arc<dyn TagHasher>,
     master_challenge: [u8; 32],
     bits: u32,
-    target_total: usize,
     nonce_source: Arc<NonceSource>,
     stop: Arc<StopFlag>,
-    tx: flume::Sender<Result<Proof, Error>>,
+    tx: Sender<ProofResult>,
+    solver: Arc<Solver>,
 ) {
     while !stop.should_stop() {
         let id = nonce_source.fetch() as usize;
-        if id >= target_total {
-            stop.force_stop();
-            break;
-        }
         let challenge = derive_challenge(hasher.as_ref(), master_challenge, id);
-        match solve_single(challenge, bits) {
-            Ok(solution) => {
+        match solver(challenge, bits) {
+            Ok(Some(solution)) => {
                 let proof = Proof {
                     id,
                     challenge,
@@ -248,6 +280,9 @@ fn worker_loop(
                     stop.force_stop();
                     break;
                 }
+            }
+            Ok(None) => {
+                continue;
             }
             Err(err) => {
                 let _ = tx.send(Err(err));
@@ -264,7 +299,7 @@ fn join_handles(joins: Vec<thread::JoinHandle<()>>) {
     }
 }
 
-fn solve_single(challenge: [u8; 32], bits: u32) -> Result<[u8; 16], Error> {
+fn solve_single(challenge: [u8; 32], bits: u32) -> Result<Option<[u8; 16]>, Error> {
     let equix =
         equix_crate::EquiX::new(&challenge).map_err(|err| Error::SolverFailed(err.to_string()))?;
     let solutions = equix.solve();
@@ -274,10 +309,10 @@ fn solve_single(challenge: [u8; 32], bits: u32) -> Result<[u8; 16], Error> {
         hasher.update(bytes);
         let hash: [u8; 32] = hasher.finalize_reset().into();
         if leading_zero_bits(&hash) >= bits {
-            return Ok(bytes);
+            return Ok(Some(bytes));
         }
     }
-    Err(Error::SolverFailed("no solution meeting difficulty".into()))
+    Ok(None)
 }
 
 fn leading_zero_bits(hash: &[u8; 32]) -> u32 {
@@ -291,4 +326,52 @@ fn leading_zero_bits(hash: &[u8; 32]) -> u32 {
         break;
     }
     count
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+
+    #[derive(Debug)]
+    struct DummyHasher;
+
+    impl TagHasher for DummyHasher {
+        fn hash(&self, data: &[u8]) -> [u8; 32] {
+            blake3::hash(data).into()
+        }
+    }
+
+    #[test]
+    fn solve_single_returns_none_when_no_solution_meets_bits() {
+        // Very high difficulty is unlikely to be met by any EquiX solution for this challenge.
+        let challenge = [0u8; 32];
+        let result = solve_single(challenge, 128).expect("solver should not error");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn worker_skips_challenges_without_solutions() {
+        let hasher: Arc<dyn TagHasher> = Arc::new(DummyHasher);
+        let progress = Arc::new(AtomicU64::new(0));
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let solver: Arc<Solver> = {
+            let attempts = attempts.clone();
+            Arc::new(move |_challenge: [u8; 32], _bits: u32| {
+                let n = attempts.fetch_add(1, Ordering::SeqCst);
+                if n < 2 {
+                    Ok(None)
+                } else {
+                    Ok(Some([n as u8; 16]))
+                }
+            })
+        };
+
+        let proofs = solve_range_with(hasher, [1u8; 32], 0, 2, 0, 3, progress.clone(), solver)
+            .expect("solver should complete");
+
+        assert_eq!(proofs.len(), 3);
+        assert!(proofs.iter().all(|p| p.id >= 2));
+        assert_eq!(progress.load(Ordering::SeqCst), 3);
+    }
 }
