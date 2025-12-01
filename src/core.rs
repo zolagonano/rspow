@@ -18,11 +18,11 @@ impl TagHasher for Blake3TagHasher {
 pub fn derive_challenge<H: TagHasher + ?Sized>(
     hasher: &H,
     master_challenge: [u8; 32],
-    proof_id: usize,
+    proof_id: u64,
 ) -> [u8; 32] {
     let mut input = Vec::with_capacity(4 + 32 + 8);
     input.extend_from_slice(b"rspow:equix:challenge:v1|");
     input.extend_from_slice(&master_challenge);
-    input.extend_from_slice(&(proof_id as u64).to_le_bytes());
+    input.extend_from_slice(&proof_id.to_le_bytes());
     hasher.hash(&input)
 }

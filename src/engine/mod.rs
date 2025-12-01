@@ -134,7 +134,7 @@ impl PowEngine for EquixEngine {
             .map(|p| p.id)
             .max()
             .map(|m| m.saturating_add(1))
-            .unwrap_or(existing.len());
+            .unwrap_or(existing.len() as u64);
         let new_proofs = solve_range(
             self.hasher.clone(),
             existing.master_challenge,
@@ -161,7 +161,7 @@ fn solve_range(
     master_challenge: [u8; 32],
     bits: u32,
     threads: usize,
-    start_nonce: usize,
+    start_nonce: u64,
     current_len: usize,
     target_total: usize,
     progress: Arc<AtomicU64>,
@@ -185,7 +185,7 @@ fn solve_range_with(
     master_challenge: [u8; 32],
     bits: u32,
     threads: usize,
-    start_nonce: usize,
+    start_nonce: u64,
     current_len: usize,
     target_total: usize,
     progress: Arc<AtomicU64>,
@@ -202,7 +202,7 @@ fn solve_range_with(
         return Ok(Vec::new());
     }
 
-    let nonce_source = Arc::new(NonceSource::new(start_nonce as u64));
+    let nonce_source = Arc::new(NonceSource::new(start_nonce));
     let stop = Arc::new(StopFlag::new());
     let bound = (threads.max(1) * 2).max(1);
     let (tx, rx): (Sender<ProofResult>, Receiver<ProofResult>) = flume::bounded(bound);
@@ -274,7 +274,7 @@ fn worker_loop(
     solver: Arc<Solver>,
 ) {
     while !stop.should_stop() {
-        let id = nonce_source.fetch() as usize;
+        let id = nonce_source.fetch();
         let challenge = derive_challenge(hasher.as_ref(), master_challenge, id);
         match solver(challenge, bits) {
             Ok(Some(solution)) => {

@@ -3,7 +3,7 @@ use crate::error::VerifyError;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Proof {
-    pub id: usize,
+    pub id: u64,
     pub challenge: [u8; 32],
     pub solution: [u8; 16],
 }
