@@ -1,39 +1,21 @@
-use std::fmt::{Display, Formatter};
+use thiserror::Error;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum VerifyError {
+    #[error("duplicate proof")]
     DuplicateProof,
+    #[error("proof does not meet difficulty")]
     InvalidDifficulty,
+    #[error("malformed proof or bundle")]
     Malformed,
 }
 
-impl Display for VerifyError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        match self {
-            VerifyError::DuplicateProof => write!(f, "duplicate proof"),
-            VerifyError::InvalidDifficulty => write!(f, "proof does not meet difficulty"),
-            VerifyError::Malformed => write!(f, "malformed proof or bundle"),
-        }
-    }
-}
-
-impl std::error::Error for VerifyError {}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum Error {
+    #[error("invalid config: {0}")]
     InvalidConfig(String),
+    #[error("solver failed: {0}")]
     SolverFailed(String),
+    #[error("solver channel closed")]
     ChannelClosed,
 }
-
-impl Display for Error {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Error::InvalidConfig(msg) => write!(f, "invalid config: {msg}"),
-            Error::SolverFailed(msg) => write!(f, "solver failed: {msg}"),
-            Error::ChannelClosed => write!(f, "solver channel closed"),
-        }
-    }
-}
-
-impl std::error::Error for Error {}
