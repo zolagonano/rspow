@@ -5,7 +5,7 @@ use crate::types::{Proof, ProofBundle, ProofConfig};
 use blake3::hash as blake3_hash;
 use derive_builder::Builder;
 use equix as equix_crate;
-use flume::{Receiver, Sender};
+use flume::{Receiver, Sender, TrySendError};
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -272,9 +272,15 @@ fn worker_loop(
                     challenge,
                     solution,
                 };
-                if tx.send(Ok(proof)).is_err() {
-                    stop.force_stop();
-                    break;
+                match tx.try_send(Ok(proof)) {
+                    Ok(()) => {}
+                    Err(TrySendError::Full(_)) => {
+                        // drop hit under backpressure
+                    }
+                    Err(TrySendError::Disconnected(_)) => {
+                        stop.force_stop();
+                        break;
+                    }
                 }
             }
             Ok(None) => {
