@@ -1,13 +1,11 @@
-use crate::core::{derive_challenge, Blake3TagHasher, TagHasher};
+use crate::core::derive_challenge;
 use crate::error::Error;
 use crate::stream::{NonceSource, StopFlag};
 use crate::types::{Proof, ProofBundle, ProofConfig};
-use crate::verify::verify_bundle_strict;
+use blake3::hash as blake3_hash;
 use derive_builder::Builder;
 use equix as equix_crate;
 use flume::{Receiver, Sender};
-use sha2::Digest;
-use sha2::Sha256;
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -29,8 +27,6 @@ pub struct EquixEngine {
     pub threads: usize,
     pub required_proofs: usize,
     pub progress: Arc<AtomicU64>,
-    #[builder(default = "Arc::new(Blake3TagHasher)")]
-    pub hasher: Arc<dyn TagHasher>,
 }
 
 type ProofResult = Result<Proof, Error>;
@@ -86,7 +82,6 @@ impl PowEngine for EquixEngine {
         };
 
         let new_proofs = solve_range(
-            self.hasher.clone(),
             master_challenge,
             self.bits,
             self.threads,
@@ -116,7 +111,8 @@ impl PowEngine for EquixEngine {
                 "bundle difficulty does not match engine".into(),
             ));
         }
-        verify_bundle_strict(&existing, self.hasher.as_ref())
+        existing
+            .verify_strict()
             .map_err(|e| Error::SolverFailed(e.to_string()))?;
         if required_proofs < existing.len() {
             return Err(Error::InvalidConfig(
@@ -136,7 +132,6 @@ impl PowEngine for EquixEngine {
             .map(|m| m.saturating_add(1))
             .unwrap_or(existing.len() as u64);
         let new_proofs = solve_range(
-            self.hasher.clone(),
             existing.master_challenge,
             self.bits,
             self.threads,
@@ -157,7 +152,6 @@ impl PowEngine for EquixEngine {
 
 #[allow(clippy::too_many_arguments)]
 fn solve_range(
-    hasher: Arc<dyn TagHasher>,
     master_challenge: [u8; 32],
     bits: u32,
     threads: usize,
@@ -167,7 +161,6 @@ fn solve_range(
     progress: Arc<AtomicU64>,
 ) -> Result<Vec<Proof>, Error> {
     solve_range_with(
-        hasher,
         master_challenge,
         bits,
         threads,
@@ -181,7 +174,6 @@ fn solve_range(
 
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn solve_range_with(
-    hasher: Arc<dyn TagHasher>,
     master_challenge: [u8; 32],
     bits: u32,
     threads: usize,
@@ -209,14 +201,12 @@ fn solve_range_with(
     let mut joins = Vec::with_capacity(threads.max(1));
 
     for _ in 0..threads.max(1) {
-        let worker_hasher = hasher.clone();
         let worker_nonce = nonce_source.clone();
         let worker_stop = stop.clone();
         let worker_tx = tx.clone();
         let worker_solver = solver.clone();
         let join = thread::spawn(move || {
             worker_loop(
-                worker_hasher,
                 master_challenge,
                 bits,
                 worker_nonce,
@@ -265,7 +255,6 @@ fn solve_range_with(
 }
 
 fn worker_loop(
-    hasher: Arc<dyn TagHasher>,
     master_challenge: [u8; 32],
     bits: u32,
     nonce_source: Arc<NonceSource>,
@@ -275,7 +264,7 @@ fn worker_loop(
 ) {
     while !stop.should_stop() {
         let id = nonce_source.fetch();
-        let challenge = derive_challenge(hasher.as_ref(), master_challenge, id);
+        let challenge = derive_challenge(master_challenge, id);
         match solver(challenge, bits) {
             Ok(Some(solution)) => {
                 let proof = Proof {
@@ -310,11 +299,10 @@ fn solve_single(challenge: [u8; 32], bits: u32) -> Result<Option<[u8; 16]>, Erro
     let equix =
         equix_crate::EquiX::new(&challenge).map_err(|err| Error::SolverFailed(err.to_string()))?;
     let solutions = equix.solve();
-    let mut hasher = Sha256::new();
     for sol in solutions.iter() {
         let bytes = sol.to_bytes();
-        hasher.update(bytes);
-        let hash: [u8; 32] = hasher.finalize_reset().into();
+        let hash = blake3_hash(&bytes);
+        let hash: [u8; 32] = *hash.as_bytes();
         if leading_zero_bits(&hash) >= bits {
             return Ok(Some(bytes));
         }
@@ -340,15 +328,6 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
-    #[derive(Debug)]
-    struct DummyHasher;
-
-    impl TagHasher for DummyHasher {
-        fn hash(&self, data: &[u8]) -> [u8; 32] {
-            blake3::hash(data).into()
-        }
-    }
-
     #[test]
     fn solve_single_returns_none_when_no_solution_meets_bits() {
         // Very high difficulty is unlikely to be met by any EquiX solution for this challenge.
@@ -359,7 +338,6 @@ mod tests {
 
     #[test]
     fn worker_skips_challenges_without_solutions() {
-        let hasher: Arc<dyn TagHasher> = Arc::new(DummyHasher);
         let progress = Arc::new(AtomicU64::new(0));
         let attempts = Arc::new(AtomicUsize::new(0));
         let solver: Arc<Solver> = {
@@ -374,7 +352,7 @@ mod tests {
             })
         };
 
-        let proofs = solve_range_with(hasher, [1u8; 32], 0, 2, 0, 0, 3, progress.clone(), solver)
+        let proofs = solve_range_with([1u8; 32], 0, 2, 0, 0, 3, progress.clone(), solver)
             .expect("solver should complete");
 
         assert_eq!(proofs.len(), 3);
@@ -388,12 +366,11 @@ mod tests {
     #[test]
     fn resume_starts_from_next_nonce() {
         let progress = Arc::new(AtomicU64::new(0));
-        let hasher = Arc::new(Blake3TagHasher);
         let master = [7u8; 32];
 
         // Build an existing bundle with a non-zero starting nonce (5).
-        let existing_proofs = solve_range(hasher.clone(), master, 1, 1, 5, 0, 1, progress.clone())
-            .expect("seed bundle");
+        let existing_proofs =
+            solve_range(master, 1, 1, 5, 0, 1, progress.clone()).expect("seed bundle");
 
         let bundle = ProofBundle {
             proofs: existing_proofs,
@@ -407,7 +384,6 @@ mod tests {
             .threads(1)
             .required_proofs(2)
             .progress(progress.clone())
-            .hasher(hasher)
             .build()
             .expect("build engine");
 

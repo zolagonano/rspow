@@ -6,7 +6,6 @@ pub mod engine;
 pub mod error;
 pub mod stream;
 pub mod types;
-pub mod verify;
 
 pub use crate::engine::{EquixEngine, EquixEngineBuilder, PowEngine};
 pub use crate::error::{Error, VerifyError};

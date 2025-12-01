@@ -1,8 +1,8 @@
-- [ ] Scaffold new EquiX-only crate structure per docs/equix_rewrite_plan.md (engine/core/types/verify/error/stream modules).
-- [ ] Define PowEngine trait with solve_bundle/resume signatures using fixed [u8;32] challenge.
-- [ ] Implement EquixEngineBuilder (derive_builder) and EquixEngine fields: bits, threads, required_proofs, progress (Arc<AtomicU64>), hasher (default BLAKE3).
-- [ ] Implement deterministic challenge derivation (TagHasher) and EquiX solving pipeline: worker pool, flume channel, NonceSource, stop flag, dedup.
-- [ ] Implement Proof/ProofBundle types with insert_proof (dedup), verify_strict (short-circuit), carrying master_challenge.
-- [ ] Implement resume: continue from existing ProofBundle to higher required_proofs without duplicating prior proofs.
-- [ ] Implement strict verification errors and minimal solve errors; wire progress increments and exact stop.
+- [x] Scaffold new EquiX-only crate structure per docs/equix_rewrite_plan.md (engine/core/types/verify/error/stream modules).
+- [x] Define PowEngine trait with solve_bundle/resume signatures using fixed [u8;32] challenge.
+- [x] Implement EquixEngineBuilder (derive_builder) and EquixEngine fields: bits, threads, required_proofs, progress (Arc<AtomicU64>), hasher (default BLAKE3).
+- [x] Implement deterministic challenge derivation (TagHasher) and EquiX solving pipeline: worker pool, flume channel, NonceSource, stop flag, dedup.
+- [x] Implement Proof/ProofBundle types with insert_proof (dedup), verify_strict (short-circuit), carrying master_challenge.
+- [x] Implement resume: continue from existing ProofBundle to higher required_proofs without duplicating prior proofs.
+- [x] Implement strict verification errors and minimal solve errors; wire progress increments and exact stop.
 - [ ] Add tests: determinism, verify_strict dup/tamper, single vs multi-thread equivalence, resume N->N+M, required_proofs=1.
