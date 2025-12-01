@@ -95,3 +95,56 @@ fn leading_zero_bits(hash: &[u8; 32]) -> u32 {
     }
     count
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::{EquixEngineBuilder, PowEngine};
+    use crate::error::VerifyError;
+    use std::sync::atomic::AtomicU64;
+    use std::sync::Arc;
+
+    fn small_bundle(bits: u32, required: usize) -> ProofBundle {
+        let progress = Arc::new(AtomicU64::new(0));
+        let mut engine = EquixEngineBuilder::default()
+            .bits(bits)
+            .threads(1)
+            .required_proofs(required)
+            .progress(progress)
+            .build()
+            .expect("build engine");
+        let master = [5u8; 32];
+        engine.solve_bundle(master).expect("solve bundle")
+    }
+
+    #[test]
+    fn verify_strict_accepts_valid_bundle() {
+        let bundle = small_bundle(1, 2);
+        bundle.verify_strict().expect("bundle should verify");
+    }
+
+    #[test]
+    fn verify_strict_rejects_duplicate_id() {
+        let base = small_bundle(1, 2);
+        let first = base.proofs[0];
+        let bundle = ProofBundle {
+            proofs: vec![first, first],
+            config: base.config,
+            master_challenge: base.master_challenge,
+        };
+        let err = bundle
+            .verify_strict()
+            .expect_err("duplicate id should be rejected");
+        assert!(matches!(err, VerifyError::DuplicateProof));
+    }
+
+    #[test]
+    fn verify_strict_rejects_tampered_challenge() {
+        let mut bundle = small_bundle(1, 1);
+        bundle.proofs[0].challenge[0] ^= 1;
+        let err = bundle
+            .verify_strict()
+            .expect_err("tampered challenge should be rejected");
+        assert!(matches!(err, VerifyError::Malformed));
+    }
+}

@@ -364,6 +364,37 @@ mod tests {
     }
 
     #[test]
+    fn solve_bundle_is_deterministic_single_thread() {
+        let master = [11u8; 32];
+
+        let progress1 = Arc::new(AtomicU64::new(0));
+        let mut engine1 = EquixEngineBuilder::default()
+            .bits(1)
+            .threads(1)
+            .required_proofs(3)
+            .progress(progress1)
+            .build()
+            .expect("build engine1");
+        let bundle1 = engine1
+            .solve_bundle(master)
+            .expect("first solve should succeed");
+
+        let progress2 = Arc::new(AtomicU64::new(0));
+        let mut engine2 = EquixEngineBuilder::default()
+            .bits(1)
+            .threads(1)
+            .required_proofs(3)
+            .progress(progress2)
+            .build()
+            .expect("build engine2");
+        let bundle2 = engine2
+            .solve_bundle(master)
+            .expect("second solve should succeed");
+
+        assert_eq!(bundle1, bundle2);
+    }
+
+    #[test]
     fn resume_starts_from_next_nonce() {
         let progress = Arc::new(AtomicU64::new(0));
         let master = [7u8; 32];
@@ -395,6 +426,79 @@ mod tests {
     }
 
     #[test]
+    fn single_and_multi_thread_solutions_are_equivalent() {
+        let master = [21u8; 32];
+        let required = 3usize;
+
+        let progress_single = Arc::new(AtomicU64::new(0));
+        let mut engine_single = EquixEngineBuilder::default()
+            .bits(1)
+            .threads(1)
+            .required_proofs(required)
+            .progress(progress_single)
+            .build()
+            .expect("build single-thread engine");
+
+        let bundle_single = engine_single
+            .solve_bundle(master)
+            .expect("single-thread solve should succeed");
+
+        let progress_multi = Arc::new(AtomicU64::new(0));
+        let mut engine_multi = EquixEngineBuilder::default()
+            .bits(1)
+            .threads(2)
+            .required_proofs(required)
+            .progress(progress_multi)
+            .build()
+            .expect("build multi-thread engine");
+
+        let bundle_multi = engine_multi
+            .solve_bundle(master)
+            .expect("multi-thread solve should succeed");
+
+        assert_eq!(bundle_single.len(), required);
+        assert_eq!(bundle_multi.len(), required);
+        bundle_single
+            .verify_strict()
+            .expect("single-thread bundle should verify");
+        bundle_multi
+            .verify_strict()
+            .expect("multi-thread bundle should verify");
+        assert_eq!(bundle_single.master_challenge, master);
+        assert_eq!(bundle_multi.master_challenge, master);
+    }
+
+    #[test]
+    fn resume_extends_bundle_n_to_n_plus_m() {
+        let master = [31u8; 32];
+        let progress = Arc::new(AtomicU64::new(0));
+        let mut engine = EquixEngineBuilder::default()
+            .bits(1)
+            .threads(2)
+            .required_proofs(2)
+            .progress(progress.clone())
+            .build()
+            .expect("build engine");
+
+        let initial = engine
+            .solve_bundle(master)
+            .expect("initial solve should succeed");
+        assert_eq!(initial.len(), 2);
+        initial
+            .verify_strict()
+            .expect("initial bundle should verify");
+
+        let resumed = engine
+            .resume(initial.clone(), 5)
+            .expect("resume should extend bundle");
+        assert_eq!(resumed.len(), 5);
+        resumed
+            .verify_strict()
+            .expect("resumed bundle should verify");
+        assert!(resumed.proofs.len() > initial.proofs.len());
+    }
+
+    #[test]
     fn resume_rejects_mismatched_bits() {
         let progress = Arc::new(AtomicU64::new(0));
         let mut engine_high = EquixEngineBuilder::default()
@@ -421,6 +525,6 @@ mod tests {
         let err = engine_low
             .resume(bundle, 2)
             .expect_err("should reject bits mismatch");
-        matches!(err, Error::InvalidConfig(_));
+        assert!(matches!(err, Error::InvalidConfig(_)));
     }
 }
