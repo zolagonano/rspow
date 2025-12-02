@@ -405,9 +405,12 @@ mod tests {
         let progress = Arc::new(AtomicU64::new(0));
         let master = [7u8; 32];
 
-        // Build an existing bundle with a non-zero starting nonce (5).
+        // Build an existing bundle starting from a non-zero nonce (5).
         let existing_proofs =
             solve_range(master, 1, 1, 5, 0, 1, progress.clone()).expect("seed bundle");
+
+        let existing_ids: Vec<u64> = existing_proofs.iter().map(|p| p.id).collect();
+        let max_existing_id = *existing_ids.iter().max().expect("have at least one proof");
 
         let bundle = ProofBundle {
             proofs: existing_proofs,
@@ -415,7 +418,7 @@ mod tests {
             master_challenge: master,
         };
 
-        // Resume should not re-use nonce 5; expect ids 5 and >=6 after resume.
+        // Resume should not re-use any existing ids; new proofs must use ids > max_existing_id.
         let mut engine = EquixEngineBuilder::default()
             .bits(1)
             .threads(1)
@@ -427,8 +430,19 @@ mod tests {
         let resumed = engine.resume(bundle, 2).expect("resume should succeed");
 
         assert_eq!(resumed.len(), 2);
-        assert!(resumed.proofs.iter().any(|p| p.id == 5));
-        assert!(resumed.proofs.iter().any(|p| p.id >= 6));
+        // All existing ids must still be present.
+        for id in &existing_ids {
+            assert!(resumed.proofs.iter().any(|p| p.id == *id));
+        }
+        // Any new ids must be strictly greater than the max existing id.
+        let new_ids: Vec<u64> = resumed
+            .proofs
+            .iter()
+            .map(|p| p.id)
+            .filter(|id| !existing_ids.contains(id))
+            .collect();
+        assert!(!new_ids.is_empty());
+        assert!(new_ids.iter().all(|id| *id > max_existing_id));
     }
 
     #[test]

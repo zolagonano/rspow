@@ -65,19 +65,19 @@ impl Proof {
             return Err(VerifyError::Malformed);
         }
 
-        let equix = equix_crate::EquiX::new(&self.challenge).map_err(|_| VerifyError::Malformed)?;
-        let solution = equix_crate::Solution::try_from_bytes(&self.solution)
-            .map_err(|_| VerifyError::Malformed)?;
-        equix
-            .verify(&solution)
-            .map_err(|_| VerifyError::Malformed)?;
-
         let hash = blake3_hash(&self.solution);
         let hash_bytes: [u8; 32] = *hash.as_bytes();
         let leading = leading_zero_bits(&hash_bytes);
         if leading < bits {
             return Err(VerifyError::InvalidDifficulty);
         }
+
+        let equix = equix_crate::EquiX::new(&self.challenge).map_err(|_| VerifyError::Malformed)?;
+        let solution = equix_crate::Solution::try_from_bytes(&self.solution)
+            .map_err(|_| VerifyError::Malformed)?;
+        equix
+            .verify(&solution)
+            .map_err(|_| VerifyError::Malformed)?;
 
         Ok(())
     }
