@@ -124,7 +124,7 @@ impl PowEngine for EquixEngine {
         if existing.len() >= required_proofs {
             return Ok(existing);
         }
-        let start_nonce = existing
+        let start_proof_id = existing
             .proofs
             .iter()
             .map(|p| p.id)
@@ -135,7 +135,7 @@ impl PowEngine for EquixEngine {
             existing.master_challenge,
             self.bits,
             self.threads,
-            start_nonce,
+            start_proof_id,
             existing.len(),
             required_proofs,
             self.progress.clone(),
@@ -155,7 +155,7 @@ fn solve_range(
     master_challenge: [u8; 32],
     bits: u32,
     threads: usize,
-    start_nonce: u64,
+    start_proof_id: u64,
     current_len: usize,
     target_total: usize,
     progress: Arc<AtomicU64>,
@@ -164,7 +164,7 @@ fn solve_range(
         master_challenge,
         bits,
         threads,
-        start_nonce,
+        start_proof_id,
         current_len,
         target_total,
         progress,
@@ -177,7 +177,7 @@ fn solve_range_with(
     master_challenge: [u8; 32],
     bits: u32,
     threads: usize,
-    start_nonce: u64,
+    start_proof_id: u64,
     current_len: usize,
     target_total: usize,
     progress: Arc<AtomicU64>,
@@ -194,14 +194,14 @@ fn solve_range_with(
         return Ok(Vec::new());
     }
 
-    let nonce_source = Arc::new(NonceSource::new(start_nonce));
+    let id_source = Arc::new(NonceSource::new(start_proof_id));
     let stop = Arc::new(StopFlag::new());
     let bound = (threads.max(1) * 2).max(1);
     let (tx, rx): (Sender<ProofResult>, Receiver<ProofResult>) = flume::bounded(bound);
     let mut joins = Vec::with_capacity(threads.max(1));
 
     for _ in 0..threads.max(1) {
-        let worker_nonce = nonce_source.clone();
+        let worker_nonce = id_source.clone();
         let worker_stop = stop.clone();
         let worker_tx = tx.clone();
         let worker_solver = solver.clone();
@@ -257,13 +257,13 @@ fn solve_range_with(
 fn worker_loop(
     master_challenge: [u8; 32],
     bits: u32,
-    nonce_source: Arc<NonceSource>,
+    id_source: Arc<NonceSource>,
     stop: Arc<StopFlag>,
     tx: Sender<ProofResult>,
     solver: Arc<Solver>,
 ) {
     while !stop.should_stop() {
-        let id = nonce_source.fetch();
+        let id = id_source.fetch();
         let challenge = derive_challenge(master_challenge, id);
         match solver(challenge, bits) {
             Ok(Some(solution)) => {
