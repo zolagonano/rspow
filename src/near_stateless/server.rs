@@ -135,3 +135,258 @@ where
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::equix::engine::EquixEngineBuilder;
+    use crate::near_stateless::client::{build_submission, solve_submission};
+    use crate::near_stateless::prf::DeterministicNonceProvider;
+    use crate::near_stateless::time::TimeProvider;
+    use crate::pow::PowEngine;
+    use std::collections::HashMap;
+    use std::sync::atomic::AtomicU64;
+
+    #[derive(Default, Clone)]
+    struct MapReplayCache {
+        map: Arc<Mutex<HashMap<[u8; 32], u64>>>,
+    }
+
+    impl ReplayCache for MapReplayCache {
+        fn insert_if_absent(
+            &self,
+            client_nonce: [u8; 32],
+            expires_at: u64,
+            now: u64,
+        ) -> Result<bool, ReplayCacheError> {
+            let mut map = self.map.lock().unwrap();
+            if let Some(exp) = map.get(&client_nonce) {
+                if *exp > now {
+                    return Ok(false);
+                }
+            }
+            map.insert(client_nonce, expires_at);
+            Ok(true)
+        }
+    }
+
+    #[derive(Clone, Copy, Default)]
+    struct TestNonceProvider;
+
+    impl DeterministicNonceProvider for TestNonceProvider {
+        fn derive(&self, secret: [u8; 32], ts: u64) -> [u8; 32] {
+            let mut out = secret;
+            out[..8].copy_from_slice(&ts.to_le_bytes());
+            out
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    struct FixedTimeProvider {
+        now: u64,
+    }
+
+    impl TimeProvider for FixedTimeProvider {
+        fn now_seconds(&self) -> u64 {
+            self.now
+        }
+    }
+
+    fn make_engine(bits: u32, required: usize) -> EquixEngineBuilder {
+        EquixEngineBuilder::default()
+            .bits(bits)
+            .threads(1)
+            .required_proofs(required)
+            .progress(Arc::new(AtomicU64::new(0)))
+    }
+
+    fn solve_one(
+        engine: &mut crate::equix::engine::EquixEngine,
+        det: [u8; 32],
+        client_nonce: [u8; 32],
+        ts: u64,
+    ) -> Submission {
+        solve_submission(engine, ts, det, client_nonce).expect("solve should succeed")
+    }
+
+    fn verifier_with(
+        cfg: VerifierConfig,
+        time: impl TimeProvider + 'static,
+        replay: impl ReplayCache + 'static,
+    ) -> NearStatelessVerifier<TestNonceProvider, impl ReplayCache, impl TimeProvider> {
+        NearStatelessVerifier::new(
+            cfg,
+            Arc::new(TestNonceProvider),
+            Arc::new(replay),
+            Arc::new(time),
+        )
+        .expect("config should be valid")
+    }
+
+    #[test]
+    fn config_rejects_subsecond_window() {
+        let cfg = VerifierConfig {
+            time_window: std::time::Duration::from_millis(900),
+            min_difficulty: 1,
+            min_required_proofs: 1,
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn verify_submission_happy_path() {
+        let mut engine = make_engine(1, 1).build_validated().unwrap();
+        let cfg = VerifierConfig {
+            time_window: std::time::Duration::from_secs(10),
+            ..Default::default()
+        };
+        let ts = 1_000;
+        let now = 1_004;
+        let det = TestNonceProvider.derive([9u8; 32], ts);
+        let client_nonce = [7u8; 32];
+        let submission = solve_one(&mut engine, det, client_nonce, ts);
+
+        let verifier = verifier_with(cfg, FixedTimeProvider { now }, MapReplayCache::default());
+
+        assert!(verifier.verify_submission([9u8; 32], &submission).is_ok());
+    }
+
+    #[test]
+    fn rejects_future_timestamp() {
+        let mut engine = make_engine(1, 1).build_validated().unwrap();
+        let ts = 10;
+        let det = TestNonceProvider.derive([1u8; 32], ts);
+        let submission = solve_one(&mut engine, det, [2u8; 32], ts);
+        let verifier = verifier_with(
+            VerifierConfig::default(),
+            FixedTimeProvider { now: 5 },
+            MapReplayCache::default(),
+        );
+
+        match verifier.verify_submission([1u8; 32], &submission) {
+            Err(NsError::FutureTimestamp) => {}
+            other => panic!("expected future timestamp, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn rejects_stale_timestamp() {
+        let mut engine = make_engine(1, 1).build_validated().unwrap();
+        let cfg = VerifierConfig {
+            time_window: std::time::Duration::from_secs(5),
+            ..Default::default()
+        };
+        let ts = 10;
+        let det = TestNonceProvider.derive([3u8; 32], ts);
+        let submission = solve_one(&mut engine, det, [4u8; 32], ts);
+        let verifier = verifier_with(
+            cfg,
+            FixedTimeProvider { now: 16 },
+            MapReplayCache::default(),
+        );
+
+        match verifier.verify_submission([3u8; 32], &submission) {
+            Err(NsError::StaleTimestamp) => {}
+            other => panic!("expected stale, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn detects_replay() {
+        let mut engine = make_engine(1, 1).build_validated().unwrap();
+        let cfg = VerifierConfig {
+            time_window: std::time::Duration::from_secs(10),
+            ..Default::default()
+        };
+        let ts = 100;
+        let det = TestNonceProvider.derive([5u8; 32], ts);
+        let submission = solve_one(&mut engine, det, [6u8; 32], ts);
+        let verifier = verifier_with(
+            cfg,
+            FixedTimeProvider { now: 103 },
+            MapReplayCache::default(),
+        );
+
+        verifier
+            .verify_submission([5u8; 32], &submission)
+            .expect("first verify should succeed");
+
+        match verifier.verify_submission([5u8; 32], &submission) {
+            Err(NsError::Replay) => {}
+            other => panic!("expected replay, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn config_update_applies_to_verification() {
+        let mut engine = make_engine(1, 1).build_validated().unwrap();
+        let ts = 200;
+        let det = TestNonceProvider.derive([8u8; 32], ts);
+        let submission = solve_one(&mut engine, det, [9u8; 32], ts);
+        let verifier = verifier_with(
+            VerifierConfig {
+                time_window: std::time::Duration::from_secs(10),
+                ..Default::default()
+            },
+            FixedTimeProvider { now: 205 },
+            MapReplayCache::default(),
+        );
+
+        let new_cfg = VerifierConfig {
+            time_window: std::time::Duration::from_secs(10),
+            min_required_proofs: 2,
+            ..Default::default()
+        };
+        verifier.set_config(new_cfg).unwrap();
+
+        match verifier.verify_submission([8u8; 32], &submission) {
+            Err(NsError::Verify(VerifyError::InvalidDifficulty)) => {}
+            other => panic!("expected difficulty error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn master_challenge_mismatch_is_rejected() {
+        let mut engine = make_engine(1, 1).build_validated().unwrap();
+        let ts = 50;
+        let det = TestNonceProvider.derive([11u8; 32], ts);
+        let submission = solve_one(&mut engine, det, [12u8; 32], ts);
+        let verifier = verifier_with(
+            VerifierConfig {
+                time_window: std::time::Duration::from_secs(10),
+                ..Default::default()
+            },
+            FixedTimeProvider { now: 55 },
+            MapReplayCache::default(),
+        );
+
+        match verifier.verify_submission([99u8; 32], &submission) {
+            Err(NsError::MasterChallengeMismatch) => {}
+            other => panic!("expected mismatch, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn build_submission_is_equivalent_to_struct_literal() {
+        let mut engine = make_engine(1, 1).build_validated().unwrap();
+        let ts = 70;
+        let det = TestNonceProvider.derive([13u8; 32], ts);
+        let client_nonce = [14u8; 32];
+        let master = derive_master_challenge(det, client_nonce);
+        let bundle = engine.solve_bundle(master).expect("solve should succeed");
+
+        let via_helper = build_submission(ts, client_nonce, bundle.clone());
+        let direct = Submission {
+            timestamp: ts,
+            client_nonce,
+            proof_bundle: bundle,
+        };
+
+        assert_eq!(via_helper.timestamp, direct.timestamp);
+        assert_eq!(via_helper.client_nonce, direct.client_nonce);
+        assert_eq!(
+            via_helper.proof_bundle.proofs.len(),
+            direct.proof_bundle.proofs.len()
+        );
+    }
+}

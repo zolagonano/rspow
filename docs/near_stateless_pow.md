@@ -4,13 +4,14 @@ This document describes the design of the "near-stateless" proof-of-work (PoW) p
 
 ## Overview
 
-Traditional PoW protocols often require the server to issue a random nonce to each client and store it to verify the solution later. This introduces a statefulness that can be exploited (e.g., by exhausting server memory with nonce requests).
+Traditional PoW protocols often require the server to issue and store random nonces. Attackers can exploit this by hoarding issued nonces and exhausting server memory. The `near-stateless` feature of `rspow` offers a helper toolkit for the protocol outlined below:
 
-The `rspow` near-stateless protocol solves this by:
-1.  **Deterministic Server Nonces**: The server generates nonces deterministically based on the current time and a secret key. This eliminates the need to store issued nonces.
-2.  **Client-derived Challenges**: The client combines the server's time-based nonce with its own random nonce to create a unique challenge.
-3.  **Strict Time Windows**: Solutions are only accepted within a specific time window, limiting the effectiveness of precomputed work.
-4.  **Minimal State**: The server only needs to cache successful `client_nonce` submissions for the duration of the time window to prevent replay attacks.
+1.  **Deterministic server nonces**: Derived from a server secret and timestamp; no issuance store is needed.
+2.  **Client-derived challenges**: Clients mix the server nonce with their own random `client_nonce`.
+3.  **Strict time windows**: Submissions are only accepted when `timestamp` lies within `[now - time_window, now]`.
+4.  **Minimal state**: The server caches only accepted `client_nonce` values for the duration of the window to block replay.
+
+The toolkit is feature-gated (`features = ["near-stateless"]`) and depends on the EquiX backend. Helper traits are pluggable so you can swap implementations without touching protocol logic.
 
 ## Threat Model & Goals
 
@@ -31,14 +32,13 @@ The protocol consists of three phases: **GetNonce**, **Solve**, and **Submit & V
 
 ### 1. GetNonce (Client -> Server)
 
-The client asks the server for the current deterministic nonce details.
+The client requests current parameters (or you expose them through any transport/API you like).
 
-1.  **Client** requests: `GET /pow/params`
-2.  **Server** determines the current timestamp `ts` (UTC integer seconds).
-3.  **Server** computes `deterministic_nonce = F(server_secret, ts)`.
-    *   `F` is a high-performance Pseudo-Random Function (PRF), specifically Keyed BLAKE3 (see *PRF Design* below).
-    *   `server_secret` is a long-lived 32-byte secret managed by the server.
-4.  **Server** returns: `{ ts, deterministic_nonce, difficulty, ... }`.
+1.  **Server** determines the current timestamp `ts` (UTC integer seconds).
+2.  **Server** computes `deterministic_nonce = F(server_secret, ts)`.
+    *   `F` is a high-performance PRF: default is keyed BLAKE3 with tag `"rspow:nonce:v1"`.
+    *   `server_secret` is a 32-byte secret you manage; all frontends must share it.
+3.  **Server** returns `{ ts, deterministic_nonce, difficulty, min_required_proofs }`.
 
 ### 2. Solve (Client)
 
@@ -54,25 +54,17 @@ The client performs the computational work.
 
 ### 3. Submit & Verify (Client -> Server)
 
-The client submits the solution to access the protected resource.
-
-1.  **Client** sends payload: `{ ts, client_nonce, proof_bundle, ... }`
-2.  **Server** performs checks in order:
-    1.  **Time Window Check**: Verify `now - time_window <= ts <= now`. If `ts` is too old or in the future, reject.
-    2.  **Replay Check**: Check if `client_nonce` exists in the replay cache (e.g., Redis). If it exists, reject.
-    3.  **Reconstruct Challenge**:
-        *   Recompute `deterministic_nonce = F(server_secret, ts)` (or fetch from a short-lived cache).
-        *   Recompute `master_challenge = BLAKE3("rspow:challenge:v1" || deterministic_nonce || client_nonce)`.
-    4.  **Verify Proof**:
-        *   Verify that `proof_bundle` is valid for `master_challenge`.
-        *   Verify that the solution meets the required `difficulty`.
-3.  **Server** finalizes:
-    *   If valid: Store `client_nonce` in the replay cache with a TTL of `time_window`.
-    *   Allow the request to proceed.
+1.  **Client** sends `{ ts, client_nonce, proof_bundle }`.
+2.  **Server** checks:
+    1.  **Time window**: `now - time_window <= ts <= now` (`time_window` must be ≥ 1s; the helper rejects smaller windows up front).
+    2.  **Replay**: look up `client_nonce` in the replay cache; if present and unexpired, reject.
+    3.  **Challenge**: recompute `deterministic_nonce` and `master_challenge` exactly as the client did.
+    4.  **Proofs**: verify the bundle with `verify_strict(min_difficulty, min_required_proofs)`.
+3.  **If valid**: insert `client_nonce` into the replay cache with expiry at `ts + time_window`.
 
 ## PRF & Deterministic Nonce Design
 
-The server derives the `deterministic_nonce` using a keyed BLAKE3 hash. BLAKE3 is chosen for its exceptional performance and security properties.
+The server derives the `deterministic_nonce` using a keyed BLAKE3 hash. BLAKE3 is chosen for its exceptional performance and security properties; the helper exposes this as `Blake3NonceProvider`, but you can provide any `DeterministicNonceProvider`.
 
 ```rust
 // Pseudocode
@@ -92,13 +84,13 @@ fn deterministic_nonce(server_secret: [u8; 32], ts: u64) -> [u8; 32] {
 To balance CPU usage and memory, we employ a two-tiered strategy:
 
 ### 1. Server-Side Nonce Caching (Optional)
-While `F(secret, ts)` is fast, a high-traffic server can cache the result of `deterministic_nonce(ts)` in memory for the duration of the second (or slightly longer) to avoid re-hashing for every request. This is purely an optimization.
+`F(secret, ts)` is intentionally cheap; in most deployments recomputation is faster and simpler than maintaining a cache. If you still prefer caching, implement it inside your `DeterministicNonceProvider`.
 
 ### 2. Replay Protection (Required)
 The server **must** track used `client_nonce` values to prevent replay attacks.
-*   **Storage**: Redis, Memcached, or an in-memory LRU cache (for single-instance deployments).
-*   **Key**: `"rspow:seen:" + client_nonce.to_hex()`
-*   **TTL**: `time_window` (e.g., 3600 seconds). After the timestamp expires, the nonce is no longer valid anyway, so the record can be dropped.
+*   **Storage**: Redis/Memcached, or the built-in `MokaReplayCache` for single-node use. If you use a capacity-bound cache, evictions can allow replays; size it for your expected QPS or provide your own `ReplayCache` implementation.
+*   **Key**: `client_nonce` bytes.
+*   **Expiry**: `ts + time_window`.
 
 ## Security Analysis
 
@@ -109,7 +101,15 @@ The attacker is limited to the `time_window`. If the window is 1 hour, an attack
 Since the `master_challenge` commits to the `client_nonce`, and the server enforces uniqueness of the `client_nonce` within the validity window, a proof cannot be reused.
 
 ### Statelessness Trade-off
-The protocol is "near-stateless" because the server does not store *issued* challenges. It only stores *fulfilled* challenges. This ensures that the storage cost is linear with the number of *successful* requests (valid users), not the number of *attempted* requests (attackers).
+The protocol is "near-stateless" because the server does not store *issued* challenges—only *fulfilled* ones for replay protection. Storage grows with successful requests instead of attacker traffic.
+
+## Helper APIs (feature = "near-stateless")
+
+- `DeterministicNonceProvider`: derive deterministic nonces; default `Blake3NonceProvider`.
+- `ReplayCache`: prevent replays; default `MokaReplayCache::insert_if_absent`.
+- `TimeProvider`: injectable clock for tests.
+- `VerifierConfig`: validated config (`time_window >= 1s`); hot-updatable via `NearStatelessVerifier::set_config` (lock-free reads with left-right).
+- `Submission`: `{ timestamp, client_nonce, ProofBundle }`; build manually or with `build_submission`/`solve_submission`.
 
 ## Implementation Notes
 
