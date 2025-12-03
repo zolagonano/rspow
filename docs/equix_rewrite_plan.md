@@ -40,7 +40,7 @@
   - Solve `Error`: minimal `InvalidConfig`, `SolverFailed(String)`, `ChannelClosed`
 
 ## Semantics
-- Per-proof deterministic challenge: `challenge_i = TagHasher::hash("rspow:equix:challenge:v1|" || master_challenge || proof_id)`.
+- Per-proof deterministic challenge: `challenge_i = TagHasher::hash("rspow:challenge:v1|" || master_challenge || proof_id)`.
 - EquiX search still varies `work_nonce` internally; store the winning `challenge` and `solution` with its `id`.
 - Dedup: client-side set of `(work_nonce, solution)`; existing bundle pre-populates dedup and progress.
 - Progress: `progress` increments on each accepted proof; front-end polls e.g., every 50ms.
