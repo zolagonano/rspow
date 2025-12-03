@@ -28,15 +28,6 @@ pub fn build_submission(
     }
 }
 
-/// Build a submission using server-issued parameters and a client-chosen nonce.
-pub fn build_submission_from_params(
-    params: &SolveParams,
-    client_nonce: [u8; 32],
-    proof_bundle: ProofBundle,
-) -> Submission {
-    build_submission(params.timestamp, client_nonce, proof_bundle)
-}
-
 /// Convenience helper: derive master challenge, solve with the provided engine, and
 /// package into a `Submission`.
 pub fn solve_submission(
