@@ -6,7 +6,7 @@ This document describes the design of the "near-stateless" proof-of-work (PoW) p
 
 Traditional PoW protocols often require the server to issue and store random nonces. Attackers can exploit this by hoarding issued nonces and exhausting server memory. The `near-stateless` feature of `rspow` offers a helper toolkit for the protocol outlined below:
 
-1.  **Deterministic server nonces**: Derived from a server secret and timestamp; no issuance store is needed.
+1.  **Deterministic server nonces**: Derived from a server secret and timestamp (the verifier stores the secret internally); no issuance store is needed.
 2.  **Client-derived challenges**: Clients mix the server nonce with their own random `client_nonce`.
 3.  **Strict time windows**: Submissions are only accepted when `timestamp` lies within `[now - time_window, now]` (time_window must be an integral number of seconds to avoid truncation ambiguity).
 4.  **Minimal state**: The server caches only accepted `client_nonce` values for the duration of the window to block replay.

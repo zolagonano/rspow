@@ -1,12 +1,12 @@
 # rspow
 
-> A proof-of-work toolbox for Rust with optional backends and a near-stateless protocol helper.
+> A proof-of-work toolbox for Rust with optional backends and a near-stateless protocol helper. **Enable `features = ["equix"]` to use the EquiX solver.**
 
 ## 0.5.0 at a glance (breaking)
 
 - **Default features are now empty.** Opt in to algorithms and toolkits explicitly to keep compile size and transitive deps small.
 - **EquiX backend is feature-gated** (`features = ["equix"]`). Other algorithms will be added behind their own features once the public API stabilizes.
-- **Near-stateless PoW toolkit** (`features = ["near-stateless"]`) offers helper traits and types for the time-bound, replay-protected workflow described below (time windows must be whole seconds to avoid silent truncation).
+- **Near-stateless PoW toolkit** (`features = ["near-stateless"]`) offers helper traits and types for the time-bound, replay-protected workflow described below (time windows must be whole seconds to avoid silent truncation). The verifier now owns the `server_secret`, so helpers (`issue_params`) require no extra secret arguments.
 - **Progress reporting**: `EquixEngine` exposes an `Arc<AtomicU64>` counter you can wire into a progress bar during long searches.
 
 ## Feature flags

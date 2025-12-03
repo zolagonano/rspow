@@ -50,6 +50,7 @@ pub struct NearStatelessVerifier<P: DeterministicNonceProvider, C: ReplayCache, 
     nonce_provider: Arc<P>,
     replay_cache: Arc<C>,
     time_provider: Arc<T>,
+    server_secret: [u8; 32],
 }
 
 impl<P, C, T> NearStatelessVerifier<P, C, T>
@@ -60,6 +61,7 @@ where
 {
     pub fn new(
         config: VerifierConfig,
+        server_secret: [u8; 32],
         nonce_provider: Arc<P>,
         replay_cache: Arc<C>,
         time_provider: Arc<T>,
@@ -74,6 +76,7 @@ where
             nonce_provider,
             replay_cache,
             time_provider,
+            server_secret,
         })
     }
 
@@ -87,9 +90,9 @@ where
     }
 
     /// Create parameters to send to a client: timestamp, deterministic nonce, and current config.
-    pub fn issue_params(&self, server_secret: [u8; 32]) -> SolveParams {
+    pub fn issue_params(&self) -> SolveParams {
         let ts = self.time_provider.now_seconds();
-        let det = self.nonce_provider.derive(server_secret, ts);
+        let det = self.nonce_provider.derive(self.server_secret, ts);
         let cfg = self
             .config_r
             .enter()
@@ -103,11 +106,7 @@ where
     }
 
     /// Verify a submission against server policy using the provided secret.
-    pub fn verify_submission(
-        &self,
-        server_secret: [u8; 32],
-        submission: &Submission,
-    ) -> Result<(), NsError> {
+    pub fn verify_submission(&self, submission: &Submission) -> Result<(), NsError> {
         let cfg = self
             .config_r
             .enter()
@@ -129,7 +128,7 @@ where
         let expires_at = ts.saturating_add(cfg.time_window.as_secs());
 
         // Recompute deterministic nonce and master challenge
-        let det_nonce = self.nonce_provider.derive(server_secret, ts);
+        let det_nonce = self.nonce_provider.derive(self.server_secret, ts);
         let master_challenge = derive_master_challenge(det_nonce, submission.client_nonce);
 
         if submission.proof_bundle.master_challenge != master_challenge {
@@ -233,6 +232,7 @@ mod tests {
     ) -> NearStatelessVerifier<TestNonceProvider, impl ReplayCache, impl TimeProvider> {
         NearStatelessVerifier::new(
             cfg,
+            [42u8; 32],
             Arc::new(TestNonceProvider),
             Arc::new(replay),
             Arc::new(time),
@@ -268,13 +268,13 @@ mod tests {
         };
         let ts = 1_000;
         let now = 1_004;
-        let det = TestNonceProvider.derive([9u8; 32], ts);
+        let det = TestNonceProvider.derive([42u8; 32], ts);
         let client_nonce = [7u8; 32];
         let submission = solve_one(&mut engine, det, client_nonce, ts);
 
         let verifier = verifier_with(cfg, FixedTimeProvider { now }, MapReplayCache::default());
 
-        assert!(verifier.verify_submission([9u8; 32], &submission).is_ok());
+        assert!(verifier.verify_submission(&submission).is_ok());
     }
 
     #[test]
@@ -289,7 +289,7 @@ mod tests {
             MapReplayCache::default(),
         );
 
-        match verifier.verify_submission([1u8; 32], &submission) {
+        match verifier.verify_submission(&submission) {
             Err(NsError::FutureTimestamp) => {}
             other => panic!("expected future timestamp, got {:?}", other),
         }
@@ -311,7 +311,7 @@ mod tests {
             MapReplayCache::default(),
         );
 
-        match verifier.verify_submission([3u8; 32], &submission) {
+        match verifier.verify_submission(&submission) {
             Err(NsError::StaleTimestamp) => {}
             other => panic!("expected stale, got {:?}", other),
         }
@@ -325,7 +325,7 @@ mod tests {
             ..Default::default()
         };
         let ts = 100;
-        let det = TestNonceProvider.derive([5u8; 32], ts);
+        let det = TestNonceProvider.derive([42u8; 32], ts);
         let submission = solve_one(&mut engine, det, [6u8; 32], ts);
         let verifier = verifier_with(
             cfg,
@@ -334,10 +334,10 @@ mod tests {
         );
 
         verifier
-            .verify_submission([5u8; 32], &submission)
+            .verify_submission(&submission)
             .expect("first verify should succeed");
 
-        match verifier.verify_submission([5u8; 32], &submission) {
+        match verifier.verify_submission(&submission) {
             Err(NsError::Replay) => {}
             other => panic!("expected replay, got {:?}", other),
         }
@@ -347,7 +347,7 @@ mod tests {
     fn config_update_applies_to_verification() {
         let mut engine = make_engine(1, 1).build_validated().unwrap();
         let ts = 200;
-        let det = TestNonceProvider.derive([8u8; 32], ts);
+        let det = TestNonceProvider.derive([42u8; 32], ts);
         let submission = solve_one(&mut engine, det, [9u8; 32], ts);
         let verifier = verifier_with(
             VerifierConfig {
@@ -365,7 +365,7 @@ mod tests {
         };
         verifier.set_config(new_cfg).unwrap();
 
-        match verifier.verify_submission([8u8; 32], &submission) {
+        match verifier.verify_submission(&submission) {
             Err(NsError::Verify(VerifyError::InvalidDifficulty)) => {}
             other => panic!("expected difficulty error, got {:?}", other),
         }
@@ -386,7 +386,7 @@ mod tests {
             MapReplayCache::default(),
         );
 
-        match verifier.verify_submission([99u8; 32], &submission) {
+        match verifier.verify_submission(&submission) {
             Err(NsError::MasterChallengeMismatch) => {}
             other => panic!("expected mismatch, got {:?}", other),
         }
@@ -430,7 +430,7 @@ mod tests {
             MapReplayCache::default(),
         );
 
-        let params = verifier.issue_params([42u8; 32]);
+        let params = verifier.issue_params();
         assert_eq!(params.config, cfg);
         assert_eq!(params.timestamp, 1_000);
 
@@ -442,7 +442,7 @@ mod tests {
         assert_eq!(submission.client_nonce, client_nonce);
 
         verifier
-            .verify_submission([42u8; 32], &submission)
+            .verify_submission(&submission)
             .expect("round-trip verify");
     }
 }
