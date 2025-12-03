@@ -20,3 +20,4 @@
   - [x] Keep deterministic nonce un-cached by default; document that PRF is cheap and caching is optional via custom provider.
   - [x] Ensure docs/examples reflect the helper APIs; no HTTP server included.
   - [x] Add unit tests for near-stateless helpers (time window, replay, config updates, challenge matching).
+- [ ] Near-stateless verifier boundary: accept timestamps exactly at `now - time_window` per docs; adjust condition and add regression test.

@@ -120,7 +120,7 @@ where
             return Err(NsError::FutureTimestamp);
         }
         let age = std::time::Duration::from_secs(now.saturating_sub(ts));
-        if age >= cfg.time_window {
+        if age > cfg.time_window {
             return Err(NsError::StaleTimestamp);
         }
 
@@ -315,6 +315,26 @@ mod tests {
             Err(NsError::StaleTimestamp) => {}
             other => panic!("expected stale, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn accepts_window_lower_bound_inclusively() {
+        let mut engine = make_engine(1, 1).build_validated().unwrap();
+        let cfg = VerifierConfig {
+            time_window: std::time::Duration::from_secs(5),
+            ..Default::default()
+        };
+        // ts exactly at now - window
+        let ts = 10;
+        let det = TestNonceProvider.derive([42u8; 32], ts);
+        let submission = solve_one(&mut engine, det, [41u8; 32], ts);
+        let verifier = verifier_with(
+            cfg,
+            FixedTimeProvider { now: 15 },
+            MapReplayCache::default(),
+        );
+
+        assert!(verifier.verify_submission(&submission).is_ok());
     }
 
     #[test]
