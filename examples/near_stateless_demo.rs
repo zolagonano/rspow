@@ -10,8 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use rspow::equix::engine::EquixEngineBuilder;
-use rspow::near_stateless::client::solve_submission_from_params;
+use rspow::near_stateless::client::{build_engine_from_params, solve_submission_from_params};
 use rspow::near_stateless::prf::Blake3NonceProvider;
 use rspow::near_stateless::server::NearStatelessVerifier;
 use rspow::near_stateless::types::{SolveParams, Submission, VerifierConfig};
@@ -62,15 +61,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
             };
 
             let client_nonce = blake3::hash(b"client-nonce-demo").into();
-            let progress = Arc::new(AtomicU64::new(0));
-
-            // Build engine matching server policy.
-            let mut engine = EquixEngineBuilder::default()
-                .bits(params.config.min_difficulty)
-                .required_proofs(params.config.min_required_proofs)
-                .threads(3)
-                .progress(progress.clone())
-                .build_validated()?;
+            // Build engine matching server policy (helper applies sensible defaults).
+            let (mut engine, progress) = build_engine_from_params(&params)?;
 
             // Show a simple textual progress indicator with percentage and bar.
             let progress_watcher = tokio::task::spawn(progress_printer(
@@ -149,7 +141,7 @@ async fn server_task(
 async fn progress_printer(progress: Arc<AtomicU64>, required_proofs: usize) {
     let mut ticker = interval(Duration::from_millis(100));
     let mut last = 0u64;
-    let per_proof: u128 = 1u128;
+    let per_proof = 1u128;
     let bar_len = 30usize;
     loop {
         ticker.tick().await;

@@ -12,12 +12,16 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread;
 
-#[derive(Builder, Debug)]
+#[derive(Builder, Clone, Debug)]
 #[builder(pattern = "owned")]
 pub struct EquixEngine {
+    #[builder(default = "7")]
     pub bits: u32,
+    #[builder(default = "3")]
     pub threads: usize,
+    #[builder(default = "30")]
     pub required_proofs: usize,
+    #[builder(default = "Arc::new(AtomicU64::new(0))")]
     pub progress: Arc<AtomicU64>,
 }
 

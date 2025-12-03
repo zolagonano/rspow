@@ -14,7 +14,9 @@ pub mod server;
 pub mod time;
 pub mod types;
 
+pub use crate::near_stateless::client::solve_submission_from_params;
 pub use cache::{MokaReplayCache, ReplayCache, ReplayCacheError};
+pub use client::build_engine_from_params;
 pub use client::{build_submission, derive_master_challenge};
 pub use prf::{Blake3NonceProvider, DeterministicNonceProvider};
 pub use server::{NearStatelessVerifier, NsError};

@@ -1,8 +1,11 @@
 use blake3::Hasher;
 
+use crate::equix::engine::EquixEngineBuilder;
 use crate::equix::{EquixEngine, ProofBundle};
 use crate::near_stateless::types::{SolveParams, Submission, SubmissionBuilderError};
 use crate::pow::PowEngine;
+use std::sync::atomic::AtomicU64;
+use std::sync::Arc;
 
 /// Derive the master challenge used by the EquiX engine.
 ///
@@ -55,4 +58,17 @@ pub fn solve_submission_from_params(
         params.deterministic_nonce,
         client_nonce,
     )
+}
+
+/// Build an `EquixEngine` from issued solve parameters with sensible defaults.
+pub fn build_engine_from_params(
+    params: &SolveParams,
+) -> Result<(EquixEngine, Arc<AtomicU64>), crate::error::Error> {
+    let progress = Arc::new(AtomicU64::new(0));
+    let engine = EquixEngineBuilder::default()
+        .bits(params.config.min_difficulty)
+        .required_proofs(params.config.min_required_proofs)
+        .progress(progress.clone())
+        .build_validated()?;
+    Ok((engine, progress))
 }
