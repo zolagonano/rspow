@@ -5,4 +5,9 @@
 - [x] Implement Proof/ProofBundle types with insert_proof (dedup), verify_strict (short-circuit), carrying master_challenge.
 - [x] Implement resume: continue from existing ProofBundle to higher required_proofs without duplicating prior proofs.
 - [x] Implement strict verification errors and minimal solve errors; wire progress increments and exact stop.
-- [ ] Add tests: determinism, verify_strict dup/tamper, single vs multi-thread equivalence, resume N->N+M, required_proofs=1.
+- [x] Add tests: determinism, verify_strict dup/tamper, single vs multi-thread equivalence, resume N->N+M, required_proofs=1.
+- [x] Introduce generic Pow traits (PowConfig, PowProof, PowBundle, PowEngine) and adapt EquiX types to implement them.
+- [ ] Add `equix` feature and gate the EquiX backend (dependency and modules) behind it (default-enabled).
+- [ ] Move EquiX-specific types (`ProofConfig`, `Proof`, `ProofBundle`) and engine (`EquixEngine`, builder, solver pipeline) into a dedicated `equix` module.
+- [ ] Trim `src/types.rs` to only hold algorithm-agnostic type aliases (e.g. `Solver`, `ProofResult`) without backend-specific structs or feature-gated types.
+- [ ] Update `lib.rs` exports and tests to use the new `equix` module / aliases and verify builds with `equix` feature enabled (and disabled, if supported).
