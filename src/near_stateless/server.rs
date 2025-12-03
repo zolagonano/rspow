@@ -3,7 +3,7 @@ use crate::error::VerifyError;
 use crate::near_stateless::cache::ReplayCache;
 use crate::near_stateless::prf::DeterministicNonceProvider;
 use crate::near_stateless::time::TimeProvider;
-use crate::near_stateless::types::{Submission, VerifierConfig};
+use crate::near_stateless::types::{SolveParams, Submission, VerifierConfig};
 use crate::near_stateless::{cache::ReplayCacheError, client::derive_master_challenge};
 use left_right::{Absorb, ReadHandle, WriteHandle};
 use std::sync::{Arc, Mutex};
@@ -86,6 +86,22 @@ where
         Ok(())
     }
 
+    /// Create parameters to send to a client: timestamp, deterministic nonce, and current config.
+    pub fn issue_params(&self, server_secret: [u8; 32]) -> SolveParams {
+        let ts = self.time_provider.now_seconds();
+        let det = self.nonce_provider.derive(server_secret, ts);
+        let cfg = self
+            .config_r
+            .enter()
+            .map(|g| g.clone())
+            .expect("config read handle closed");
+        SolveParams {
+            timestamp: ts,
+            deterministic_nonce: det,
+            config: cfg,
+        }
+    }
+
     /// Verify a submission against server policy using the provided secret.
     pub fn verify_submission(
         &self,
@@ -104,14 +120,13 @@ where
         if ts > now {
             return Err(NsError::FutureTimestamp);
         }
-        let age = now.saturating_sub(ts);
-        let window_secs = cfg.time_window.as_secs();
-        if age >= window_secs {
+        let age = std::time::Duration::from_secs(now.saturating_sub(ts));
+        if age >= cfg.time_window {
             return Err(NsError::StaleTimestamp);
         }
 
         // Compute expiry for replay cache: ts + window
-        let expires_at = ts.saturating_add(window_secs);
+        let expires_at = ts.saturating_add(cfg.time_window.as_secs());
 
         // Recompute deterministic nonce and master challenge
         let det_nonce = self.nonce_provider.derive(server_secret, ts);
@@ -140,7 +155,9 @@ where
 mod tests {
     use super::*;
     use crate::equix::engine::EquixEngineBuilder;
-    use crate::near_stateless::client::{build_submission, solve_submission};
+    use crate::near_stateless::client::{
+        build_submission, solve_submission, solve_submission_from_params,
+    };
     use crate::near_stateless::prf::DeterministicNonceProvider;
     use crate::near_stateless::time::TimeProvider;
     use crate::pow::PowEngine;
@@ -229,6 +246,15 @@ mod tests {
             time_window: std::time::Duration::from_millis(900),
             min_difficulty: 1,
             min_required_proofs: 1,
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn config_rejects_non_integer_seconds() {
+        let cfg = VerifierConfig {
+            time_window: std::time::Duration::from_millis(1_500),
+            ..Default::default()
         };
         assert!(cfg.validate().is_err());
     }
@@ -388,5 +414,35 @@ mod tests {
             via_helper.proof_bundle.proofs.len(),
             direct.proof_bundle.proofs.len()
         );
+    }
+
+    #[test]
+    fn issue_params_and_solve_round_trip() {
+        let cfg = VerifierConfig {
+            time_window: std::time::Duration::from_secs(10),
+            min_difficulty: 1,
+            min_required_proofs: 1,
+        };
+        let mut engine = make_engine(1, 1).build_validated().unwrap();
+        let verifier = verifier_with(
+            cfg.clone(),
+            FixedTimeProvider { now: 1_000 },
+            MapReplayCache::default(),
+        );
+
+        let params = verifier.issue_params([42u8; 32]);
+        assert_eq!(params.config, cfg);
+        assert_eq!(params.timestamp, 1_000);
+
+        let client_nonce = [77u8; 32];
+        let submission = solve_submission_from_params(&mut engine, &params, client_nonce)
+            .expect("solve from params");
+
+        assert_eq!(submission.timestamp, params.timestamp);
+        assert_eq!(submission.client_nonce, client_nonce);
+
+        verifier
+            .verify_submission([42u8; 32], &submission)
+            .expect("round-trip verify");
     }
 }

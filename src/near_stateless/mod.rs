@@ -19,4 +19,4 @@ pub use client::{build_submission, derive_master_challenge};
 pub use prf::{Blake3NonceProvider, DeterministicNonceProvider};
 pub use server::{NearStatelessVerifier, NsError};
 pub use time::{SystemTimeProvider, TimeProvider};
-pub use types::{Submission, SubmissionBuilderError, VerifierConfig};
+pub use types::{SolveParams, Submission, SubmissionBuilderError, VerifierConfig};

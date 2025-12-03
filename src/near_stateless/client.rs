@@ -1,7 +1,7 @@
 use blake3::Hasher;
 
 use crate::equix::{EquixEngine, ProofBundle};
-use crate::near_stateless::types::{Submission, SubmissionBuilderError};
+use crate::near_stateless::types::{SolveParams, Submission, SubmissionBuilderError};
 use crate::pow::PowEngine;
 
 /// Derive the master challenge used by the EquiX engine.
@@ -28,6 +28,15 @@ pub fn build_submission(
     }
 }
 
+/// Build a submission using server-issued parameters and a client-chosen nonce.
+pub fn build_submission_from_params(
+    params: &SolveParams,
+    client_nonce: [u8; 32],
+    proof_bundle: ProofBundle,
+) -> Submission {
+    build_submission(params.timestamp, client_nonce, proof_bundle)
+}
+
 /// Convenience helper: derive master challenge, solve with the provided engine, and
 /// package into a `Submission`.
 pub fn solve_submission(
@@ -41,4 +50,18 @@ pub fn solve_submission(
         .solve_bundle(master_challenge)
         .map_err(|e| SubmissionBuilderError::InvalidConfig(e.to_string()))?;
     Ok(build_submission(timestamp, client_nonce, proof_bundle))
+}
+
+/// Convenience: consume server-issued params, derive challenge, solve, and package.
+pub fn solve_submission_from_params(
+    engine: &mut EquixEngine,
+    params: &SolveParams,
+    client_nonce: [u8; 32],
+) -> Result<Submission, SubmissionBuilderError> {
+    solve_submission(
+        engine,
+        params.timestamp,
+        params.deterministic_nonce,
+        client_nonce,
+    )
 }

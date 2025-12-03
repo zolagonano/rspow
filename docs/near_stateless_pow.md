@@ -8,7 +8,7 @@ Traditional PoW protocols often require the server to issue and store random non
 
 1.  **Deterministic server nonces**: Derived from a server secret and timestamp; no issuance store is needed.
 2.  **Client-derived challenges**: Clients mix the server nonce with their own random `client_nonce`.
-3.  **Strict time windows**: Submissions are only accepted when `timestamp` lies within `[now - time_window, now]`.
+3.  **Strict time windows**: Submissions are only accepted when `timestamp` lies within `[now - time_window, now]` (time_window must be an integral number of seconds to avoid truncation ambiguity).
 4.  **Minimal state**: The server caches only accepted `client_nonce` values for the duration of the window to block replay.
 
 The toolkit is feature-gated (`features = ["near-stateless"]`) and depends on the EquiX backend. Helper traits are pluggable so you can swap implementations without touching protocol logic.
@@ -56,7 +56,7 @@ The client performs the computational work.
 
 1.  **Client** sends `{ ts, client_nonce, proof_bundle }`.
 2.  **Server** checks:
-    1.  **Time window**: `now - time_window <= ts <= now` (`time_window` must be ≥ 1s; the helper rejects smaller windows up front).
+    1.  **Time window**: `now - time_window <= ts <= now` (`time_window` must be ≥ 1s and an integral number of seconds; the helper rejects other values up front).
     2.  **Replay**: look up `client_nonce` in the replay cache; if present and unexpired, reject.
     3.  **Challenge**: recompute `deterministic_nonce` and `master_challenge` exactly as the client did.
     4.  **Proofs**: verify the bundle with `verify_strict(min_difficulty, min_required_proofs)`.
@@ -110,6 +110,7 @@ The protocol is "near-stateless" because the server does not store *issued* chal
 - `TimeProvider`: injectable clock for tests.
 - `VerifierConfig`: validated config (`time_window >= 1s`); hot-updatable via `NearStatelessVerifier::set_config` (lock-free reads with left-right).
 - `Submission`: `{ timestamp, client_nonce, ProofBundle }`; build manually or with `build_submission`/`solve_submission`.
+- `SolveParams` + `issue_params/solve_submission_from_params`: server can issue a single struct containing `{timestamp, deterministic_nonce, config}`; clients plug in their `client_nonce` and solve/package without extra plumbing.
 
 ## Implementation Notes
 

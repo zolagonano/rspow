@@ -6,7 +6,7 @@
 
 - **Default features are now empty.** Opt in to algorithms and toolkits explicitly to keep compile size and transitive deps small.
 - **EquiX backend is feature-gated** (`features = ["equix"]`). Other algorithms will be added behind their own features once the public API stabilizes.
-- **Near-stateless PoW toolkit** (`features = ["near-stateless"]`) offers helper traits and types for the time-bound, replay-protected workflow described below.
+- **Near-stateless PoW toolkit** (`features = ["near-stateless"]`) offers helper traits and types for the time-bound, replay-protected workflow described below (time windows must be whole seconds to avoid silent truncation).
 - **Progress reporting**: `EquixEngine` exposes an `Arc<AtomicU64>` counter you can wire into a progress bar during long searches.
 
 ## Feature flags
@@ -38,7 +38,7 @@ Progress bars: read `progress.load(Ordering::Relaxed)` to track how many challen
 - **Deterministic nonce provider** (`DeterministicNonceProvider`): default is keyed BLAKE3 with tag `"rspow:nonce:v1"`.
 - **Replay cache** (`ReplayCache`): default in-memory `MokaReplayCache`; pluggable for Redis/Memcached. If the cache is capacity-bound, evictions can allow replays—size it for your load or provide your own implementation.
 - **Time provider** (`TimeProvider`): injectable clock for tests.
-- **Verifier configuration** (`VerifierConfig`): `time_window >= 1s`, `min_difficulty`, `min_required_proofs`; hot-swappable at runtime via `set_config` (internally lock-free reads with left-right).
+- **Verifier configuration** (`VerifierConfig`): `time_window >= 1s` and an *integral* number of seconds, `min_difficulty`, `min_required_proofs`; hot-swappable at runtime via `set_config` (internally lock-free reads with left-right).
 - **Submission**: `{ timestamp, client_nonce, ProofBundle }` from the client.
 
 Protocol sketch (details in `docs/near_stateless_pow.md`):
@@ -47,7 +47,7 @@ Protocol sketch (details in `docs/near_stateless_pow.md`):
 2) Client samples a random `client_nonce`, derives `master_challenge = BLAKE3("rspow:challenge:v1" || deterministic_nonce || client_nonce)`, solves for a `ProofBundle`.
 3) Client submits `{timestamp, client_nonce, proof_bundle}`. Server recomputes the nonce/challenge, enforces time window, verifies proofs against policy, then records `client_nonce` in the replay cache until `timestamp + time_window`.
 
-Server-side flow in brief: derive deterministic nonce with your secret, enforce the time window, check replay cache, recompute master challenge, and call `verify_submission`; see `docs/near_stateless_pow.md` for the full walk-through and helper APIs (client/server).
+Server-side flow in brief: derive deterministic nonce with your secret, enforce the (integral-seconds) time window, check replay cache, recompute master challenge, and call `verify_submission`; see `docs/near_stateless_pow.md` for the full walk-through and helper APIs (including `issue_params`/`solve_submission_from_params`).
 
 ## Testing & linting
 

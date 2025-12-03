@@ -23,9 +23,15 @@ impl Default for VerifierConfig {
 
 impl VerifierConfig {
     pub fn validate(&self) -> Result<(), Error> {
+        // Require integral seconds to avoid silent truncation.
         if self.time_window < Duration::from_secs(1) {
             return Err(Error::InvalidConfig(
                 "time_window must be at least 1 second".into(),
+            ));
+        }
+        if self.time_window.subsec_nanos() != 0 {
+            return Err(Error::InvalidConfig(
+                "time_window must be a whole number of seconds".into(),
             ));
         }
         if self.min_difficulty == 0 {
@@ -46,6 +52,14 @@ pub struct Submission {
     pub timestamp: u64,
     pub client_nonce: [u8; 32],
     pub proof_bundle: ProofBundle,
+}
+
+/// Parameters a server sends to clients for solving.
+#[derive(Debug, Clone)]
+pub struct SolveParams {
+    pub timestamp: u64,
+    pub deterministic_nonce: [u8; 32],
+    pub config: VerifierConfig,
 }
 
 #[derive(Debug, thiserror::Error)]
