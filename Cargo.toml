@@ -14,7 +14,7 @@ edition = "2021"
 [features]
 default = ["equix"]
 equix = ["dep:equix"]
-near-stateless = ["equix", "dep:moka"]
+near-stateless = ["equix", "dep:moka", "dep:left-right"]
 
 [dependencies]
 argon2 = "0.5.3"
@@ -30,5 +30,6 @@ blake3 = "1.5.4"
 derive_builder = "0.20"
 thiserror = "2.0.17"
 moka = { version = "0.12.8", optional = true, features = ["sync"] }
+left-right = { version = "0.11", optional = true }
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.2", features = ["js"] }

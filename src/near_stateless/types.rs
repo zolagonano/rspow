@@ -11,10 +11,22 @@ pub struct VerifierConfig {
     pub min_required_proofs: usize,
 }
 
+impl Default for VerifierConfig {
+    fn default() -> Self {
+        Self {
+            time_window: Duration::from_secs(1),
+            min_difficulty: 1,
+            min_required_proofs: 1,
+        }
+    }
+}
+
 impl VerifierConfig {
     pub fn validate(&self) -> Result<(), Error> {
-        if self.time_window.is_zero() {
-            return Err(Error::InvalidConfig("time_window must be > 0".into()));
+        if self.time_window < Duration::from_secs(1) {
+            return Err(Error::InvalidConfig(
+                "time_window must be at least 1 second".into(),
+            ));
         }
         if self.min_difficulty == 0 {
             return Err(Error::InvalidConfig("min_difficulty must be >= 1".into()));

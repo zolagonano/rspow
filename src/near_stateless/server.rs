@@ -5,8 +5,8 @@ use crate::near_stateless::prf::DeterministicNonceProvider;
 use crate::near_stateless::time::TimeProvider;
 use crate::near_stateless::types::{Submission, VerifierConfig};
 use crate::near_stateless::{cache::ReplayCacheError, client::derive_master_challenge};
-use std::sync::Arc;
-use std::sync::RwLock;
+use left_right::{Absorb, ReadHandle, WriteHandle};
+use std::sync::{Arc, Mutex};
 
 #[derive(Debug, thiserror::Error)]
 pub enum NsError {
@@ -26,9 +26,27 @@ pub enum NsError {
     Cache(#[from] ReplayCacheError),
 }
 
+/// Update messages for left-right config.
+enum ConfigUpdate {
+    Set(VerifierConfig),
+}
+
+impl Absorb<ConfigUpdate> for VerifierConfig {
+    fn absorb_first(&mut self, update: &mut ConfigUpdate, _first: &Self) {
+        match update {
+            ConfigUpdate::Set(cfg) => *self = cfg.clone(),
+        }
+    }
+
+    fn sync_with(&mut self, first: &Self) {
+        *self = first.clone();
+    }
+}
+
 /// Server-side verifier helper for near-stateless PoW submissions.
 pub struct NearStatelessVerifier<P: DeterministicNonceProvider, C: ReplayCache, T: TimeProvider> {
-    config: RwLock<VerifierConfig>,
+    config_r: ReadHandle<VerifierConfig>,
+    config_w: Mutex<WriteHandle<VerifierConfig, ConfigUpdate>>,
     nonce_provider: Arc<P>,
     replay_cache: Arc<C>,
     time_provider: Arc<T>,
@@ -47,8 +65,12 @@ where
         time_provider: Arc<T>,
     ) -> Result<Self, Error> {
         config.validate()?;
+        let (mut config_w, config_r) = left_right::new::<VerifierConfig, ConfigUpdate>();
+        config_w.append(ConfigUpdate::Set(config));
+        config_w.publish();
         Ok(Self {
-            config: RwLock::new(config),
+            config_r,
+            config_w: Mutex::new(config_w),
             nonce_provider,
             replay_cache,
             time_provider,
@@ -58,8 +80,9 @@ where
     /// Update verifier configuration at runtime.
     pub fn set_config(&self, new_config: VerifierConfig) -> Result<(), Error> {
         new_config.validate()?;
-        let mut guard = self.config.write().expect("config lock poisoned");
-        *guard = new_config;
+        let mut wh = self.config_w.lock().expect("config writer poisoned");
+        wh.append(ConfigUpdate::Set(new_config));
+        wh.publish();
         Ok(())
     }
 
@@ -69,7 +92,11 @@ where
         server_secret: [u8; 32],
         submission: &Submission,
     ) -> Result<(), NsError> {
-        let cfg = self.config.read().expect("config lock poisoned").clone();
+        let cfg = self
+            .config_r
+            .enter()
+            .map(|g| g.clone())
+            .expect("config read handle closed");
 
         let now = self.time_provider.now_seconds();
         let ts = submission.timestamp;
@@ -77,13 +104,14 @@ where
         if ts > now {
             return Err(NsError::FutureTimestamp);
         }
-        let age = now - ts;
-        if age as u128 >= cfg.time_window.as_secs() as u128 {
+        let age = now.saturating_sub(ts);
+        let window_secs = cfg.time_window.as_secs();
+        if age >= window_secs {
             return Err(NsError::StaleTimestamp);
         }
 
         // Compute expiry for replay cache: ts + window
-        let expires_at = ts.saturating_add(cfg.time_window.as_secs());
+        let expires_at = ts.saturating_add(window_secs);
 
         // Recompute deterministic nonce and master challenge
         let det_nonce = self.nonce_provider.derive(server_secret, ts);
