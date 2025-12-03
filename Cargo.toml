@@ -16,6 +16,13 @@ default = []
 equix = ["dep:equix"]
 near-stateless = ["equix", "dep:moka", "dep:left-right"]
 
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+
+[[example]]
+name = "near_stateless_demo"
+required-features = ["equix", "near-stateless"]
+
 [dependencies]
 argon2 = "0.5.3"
 equix = { version = "0.5.0", optional = true }

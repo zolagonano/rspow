@@ -29,6 +29,8 @@ Raising leading-zero difficulty increases expected attempts exponentially (`2^bi
 
 ## Quick start (EquiX)
 
+> Enable `features = ["equix"]`. Examples require explicit features.
+
 Progress bars: read `progress.load(Ordering::Relaxed)` to track how many challenges have been attempted (when provided to `EquixEngine`).
 
 ## Near-stateless PoW toolkit (opt-in)
@@ -48,6 +50,14 @@ Protocol sketch (details in `docs/near_stateless_pow.md`):
 3) Client submits `{timestamp, client_nonce, proof_bundle}`. Server recomputes the nonce/challenge, enforces time window, verifies proofs against policy, then records `client_nonce` in the replay cache until `timestamp + time_window`.
 
 Server-side flow in brief: derive deterministic nonce with your secret, enforce the (integral-seconds) time window, check replay cache, recompute master challenge, and call `verify_submission`; see `docs/near_stateless_pow.md` for the full walk-through and helper APIs (including `issue_params`/`solve_submission_from_params`).
+
+### Example
+
+Run the async end-to-end demo (requires `--features "equix near-stateless"`):
+
+```bash
+cargo run --example near_stateless_demo --features "equix near-stateless"
+```
 
 ## Testing & linting
 
