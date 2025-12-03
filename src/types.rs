@@ -1,5 +1,6 @@
 use crate::core::derive_challenge;
 use crate::error::VerifyError;
+use crate::pow::{PowBundle, PowConfig, PowProof};
 use blake3::hash as blake3_hash;
 use equix as equix_crate;
 
@@ -20,6 +21,43 @@ pub struct ProofBundle {
     pub proofs: Vec<Proof>,
     pub config: ProofConfig,
     pub master_challenge: [u8; 32],
+}
+
+impl PowProof for Proof {
+    fn id(&self) -> u64 {
+        self.id
+    }
+}
+
+impl PowConfig for ProofConfig {
+    fn difficulty(&self) -> u32 {
+        self.bits
+    }
+}
+
+impl PowBundle for ProofBundle {
+    type Proof = Proof;
+    type Config = ProofConfig;
+
+    fn proofs(&self) -> &[Self::Proof] {
+        &self.proofs
+    }
+
+    fn config(&self) -> &Self::Config {
+        &self.config
+    }
+
+    fn master_challenge(&self) -> &[u8; 32] {
+        &self.master_challenge
+    }
+
+    fn insert_proof(&mut self, proof: Self::Proof) -> Result<(), VerifyError> {
+        ProofBundle::insert_proof(self, proof)
+    }
+
+    fn verify_strict(&self) -> Result<(), VerifyError> {
+        ProofBundle::verify_strict(self)
+    }
 }
 
 impl ProofBundle {
@@ -99,8 +137,9 @@ fn leading_zero_bits(hash: &[u8; 32]) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::{EquixEngineBuilder, PowEngine};
+    use crate::engine::EquixEngineBuilder;
     use crate::error::VerifyError;
+    use crate::pow::PowEngine;
     use std::sync::atomic::AtomicU64;
     use std::sync::Arc;
 

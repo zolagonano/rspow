@@ -1,5 +1,6 @@
 use crate::core::derive_challenge;
 use crate::error::Error;
+use crate::pow::PowEngine;
 use crate::stream::{NonceSource, StopFlag};
 use crate::types::{Proof, ProofBundle, ProofConfig};
 use blake3::hash as blake3_hash;
@@ -10,15 +11,6 @@ use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread;
-
-pub trait PowEngine {
-    fn solve_bundle(&mut self, master_challenge: [u8; 32]) -> Result<ProofBundle, Error>;
-    fn resume(
-        &mut self,
-        existing: ProofBundle,
-        required_proofs: usize,
-    ) -> Result<ProofBundle, Error>;
-}
 
 #[derive(Builder, Debug)]
 #[builder(pattern = "owned")]
@@ -72,7 +64,9 @@ impl EquixEngineBuilder {
 }
 
 impl PowEngine for EquixEngine {
-    fn solve_bundle(&mut self, master_challenge: [u8; 32]) -> Result<ProofBundle, Error> {
+    type Bundle = ProofBundle;
+
+    fn solve_bundle(&mut self, master_challenge: [u8; 32]) -> Result<Self::Bundle, Error> {
         self.validate()?;
         self.progress.store(0, Ordering::SeqCst);
         let mut bundle = ProofBundle {
@@ -102,9 +96,9 @@ impl PowEngine for EquixEngine {
 
     fn resume(
         &mut self,
-        mut existing: ProofBundle,
+        mut existing: Self::Bundle,
         required_proofs: usize,
-    ) -> Result<ProofBundle, Error> {
+    ) -> Result<Self::Bundle, Error> {
         self.validate()?;
         if existing.config.bits != self.bits {
             return Err(Error::InvalidConfig(
