@@ -62,7 +62,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
             let client_nonce = blake3::hash(b"client-nonce-demo").into();
             // Build engine matching server policy (helper applies sensible defaults).
-            let (mut engine, progress) = build_engine_from_params(&params)?;
+            let mut engine = build_engine_from_params(&params)?;
+            let progress = engine.progress.clone();
 
             // Show a simple textual progress indicator with percentage and bar.
             let progress_watcher = tokio::task::spawn(progress_printer(

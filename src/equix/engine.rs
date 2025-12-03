@@ -53,6 +53,15 @@ impl EquixEngine {
         self.required_proofs = required_proofs;
         Ok(())
     }
+
+    /// Update the number of threads used by the engine.
+    pub fn set_threads(&mut self, threads: usize) -> Result<(), Error> {
+        if threads == 0 {
+            return Err(Error::InvalidConfig("threads must be >= 1".into()));
+        }
+        self.threads = threads;
+        Ok(())
+    }
 }
 
 impl EquixEngineBuilder {
