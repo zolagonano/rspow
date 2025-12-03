@@ -12,10 +12,10 @@
 - [x] Trim `src/types.rs` to only hold algorithm-agnostic type aliases (e.g. `Solver`, `ProofResult`) without backend-specific structs or feature-gated types.
 - [x] Update `lib.rs` exports and tests to use the new `equix` module / aliases and verify builds with `equix` feature enabled (and disabled, if supported).
 - [ ] Add optional `near-stateless` feature (default OFF) exposing helper toolkit.
-  - [ ] Define `DeterministicNonceProvider` trait and default keyed-BLAKE3 implementation (no caching).
-  - [ ] Define `ReplayCache` trait and provide an in-memory TTL implementation (using moka or lightweight map) for replay protection.
+  - [x] Define `DeterministicNonceProvider` trait and default keyed-BLAKE3 implementation (no caching).
+  - [x] Define `ReplayCache` trait and provide an in-memory TTL implementation (using moka or lightweight map) for replay protection.
   - [ ] Provide `VerifierConfig` with runtime-update (async) support for `time_window`, `min_difficulty`, `min_required_proofs`.
-  - [ ] Add client-side helpers to build `master_challenge`, run EquiX, and package `{ts, client_nonce, ProofBundle}` into a submission struct.
-  - [ ] Add server-side helper to verify the submission struct end-to-end (time window, replay cache, deterministic nonce via provider, master challenge check, `verify_strict`).
-  - [ ] Keep deterministic nonce un-cached by default; document that PRF is cheap and caching is optional via custom provider.
+  - [x] Add client-side helpers to build `master_challenge`, run EquiX, and package `{ts, client_nonce, ProofBundle}` into a submission struct.
+  - [x] Add server-side helper to verify the submission struct end-to-end (time window, replay cache, deterministic nonce via provider, master challenge check, `verify_strict`).
+  - [x] Keep deterministic nonce un-cached by default; document that PRF is cheap and caching is optional via custom provider.
   - [ ] Ensure docs/examples reflect the helper APIs; no HTTP server included.
