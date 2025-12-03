@@ -52,7 +52,15 @@ pub trait PowBundle {
     fn insert_proof(&mut self, proof: Self::Proof) -> Result<(), VerifyError>;
 
     /// Strictly verify this bundle, including all contained proofs and structural invariants.
-    fn verify_strict(&self) -> Result<(), VerifyError>;
+    ///
+    /// The caller must provide the minimum difficulty and the minimum number of
+    /// proofs required by their policy. Implementations must reject bundles that
+    /// declare or contain less work than requested.
+    fn verify_strict(
+        &self,
+        min_difficulty: u32,
+        min_required_proofs: usize,
+    ) -> Result<(), VerifyError>;
 }
 
 /// A proof-of-work engine capable of solving and resuming bundles.

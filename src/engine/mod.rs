@@ -114,7 +114,7 @@ impl PowEngine for EquixEngine {
             ));
         }
         existing
-            .verify_strict()
+            .verify_strict(self.bits, existing.len())
             .map_err(|e| Error::SolverFailed(e.to_string()))?;
         let required_proofs = self.required_proofs;
         if required_proofs < existing.len() {
@@ -481,10 +481,10 @@ mod tests {
         assert_eq!(bundle_single.len(), required);
         assert_eq!(bundle_multi.len(), required);
         bundle_single
-            .verify_strict()
+            .verify_strict(1, required)
             .expect("single-thread bundle should verify");
         bundle_multi
-            .verify_strict()
+            .verify_strict(1, required)
             .expect("multi-thread bundle should verify");
         assert_eq!(bundle_single.master_challenge, master);
         assert_eq!(bundle_multi.master_challenge, master);
@@ -507,7 +507,7 @@ mod tests {
             .expect("initial solve should succeed");
         assert_eq!(initial.len(), 2);
         initial
-            .verify_strict()
+            .verify_strict(1, 2)
             .expect("initial bundle should verify");
 
         engine
@@ -519,7 +519,7 @@ mod tests {
             .expect("resume should extend bundle");
         assert_eq!(resumed.len(), 5);
         resumed
-            .verify_strict()
+            .verify_strict(1, 5)
             .expect("resumed bundle should verify");
         assert!(resumed.proofs.len() > initial.proofs.len());
     }

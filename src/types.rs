@@ -55,8 +55,12 @@ impl PowBundle for ProofBundle {
         ProofBundle::insert_proof(self, proof)
     }
 
-    fn verify_strict(&self) -> Result<(), VerifyError> {
-        ProofBundle::verify_strict(self)
+    fn verify_strict(
+        &self,
+        min_difficulty: u32,
+        min_required_proofs: usize,
+    ) -> Result<(), VerifyError> {
+        ProofBundle::verify_strict(self, min_difficulty, min_required_proofs)
     }
 }
 
@@ -78,7 +82,18 @@ impl ProofBundle {
         Ok(())
     }
 
-    pub fn verify_strict(&self) -> Result<(), VerifyError> {
+    pub fn verify_strict(
+        &self,
+        min_difficulty: u32,
+        min_required_proofs: usize,
+    ) -> Result<(), VerifyError> {
+        if self.proofs.len() < min_required_proofs {
+            return Err(VerifyError::InvalidDifficulty);
+        }
+        if self.config.bits < min_difficulty {
+            return Err(VerifyError::InvalidDifficulty);
+        }
+
         let mut prev_id: Option<u64> = None;
         for proof in &self.proofs {
             if let Some(pid) = prev_id {
@@ -159,7 +174,7 @@ mod tests {
     #[test]
     fn verify_strict_accepts_valid_bundle() {
         let bundle = small_bundle(1, 2);
-        bundle.verify_strict().expect("bundle should verify");
+        bundle.verify_strict(1, 2).expect("bundle should verify");
     }
 
     #[test]
@@ -172,7 +187,7 @@ mod tests {
             master_challenge: base.master_challenge,
         };
         let err = bundle
-            .verify_strict()
+            .verify_strict(1, 2)
             .expect_err("duplicate id should be rejected");
         assert!(matches!(err, VerifyError::DuplicateProof));
     }
@@ -182,7 +197,7 @@ mod tests {
         let mut bundle = small_bundle(1, 1);
         bundle.proofs[0].challenge[0] ^= 1;
         let err = bundle
-            .verify_strict()
+            .verify_strict(1, 1)
             .expect_err("tampered challenge should be rejected");
         assert!(matches!(err, VerifyError::Malformed));
     }
