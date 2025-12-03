@@ -5,13 +5,13 @@ pub mod error;
 pub mod pow;
 
 pub mod core;
-#[cfg(feature = "equix")]
-pub mod engine;
 pub mod stream;
-#[cfg(feature = "equix")]
 pub mod types;
 
+#[cfg(feature = "equix")]
+pub mod equix;
+
+#[cfg(feature = "equix")]
+pub use crate::equix::{EquixEngine, EquixEngineBuilder, Proof, ProofBundle, ProofConfig};
 pub use crate::error::{Error, VerifyError};
 pub use crate::pow::{PowBundle, PowConfig, PowEngine, PowProof};
-#[cfg(feature = "equix")]
-pub use crate::types::{Proof, ProofBundle, ProofConfig};

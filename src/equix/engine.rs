@@ -1,8 +1,8 @@
 use crate::core::derive_challenge;
+use crate::equix::types::{Proof, ProofBundle, ProofConfig};
 use crate::error::Error;
 use crate::pow::PowEngine;
 use crate::stream::{NonceSource, StopFlag};
-use crate::types::{Proof, ProofBundle, ProofConfig};
 use blake3::hash as blake3_hash;
 use derive_builder::Builder;
 use equix as equix_crate;
@@ -334,6 +334,8 @@ fn leading_zero_bits(hash: &[u8; 32]) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::equix::types::{ProofBundle, ProofConfig};
+    use crate::error::Error;
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
     #[test]
