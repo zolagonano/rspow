@@ -51,6 +51,23 @@ Protocol sketch (details in `docs/near_stateless_pow.md`):
 
 Server-side flow in brief: derive deterministic nonce with your secret, enforce the (integral-seconds) time window, check replay cache, recompute master challenge, and call `verify_submission`; see `docs/near_stateless_pow.md` for the full walk-through and helper APIs (including `issue_params`/`solve_submission_from_params`).
 
+### Example: end-to-end demo
+
+The `examples/near_stateless_demo.rs` program shows a minimal async client/server flow using the toolkit:
+
+- Server issues deterministic nonce + config (`issue_params`), verifies submissions, and blocks replays.
+- Client derives the master challenge, solves with EquiX, reports progress, and submits a proof bundle.
+- Progress bar shows percentage, bar, proofs done, and attempts.
+- Uses a single-thread Tokio runtime plus `spawn_blocking` for the CPU-heavy solve.
+
+Run it (features must be enabled explicitly):
+
+```bash
+cargo r --release -F equix,near-stateless --example near_stateless_demo
+```
+
+You can reuse it as a reference when wiring rspow into your own service: copy the parameter issuance, solve, submit, and verify steps to fit your transport/protocol.
+
 ### Example
 
 Run the async end-to-end demo (requires `--features "equix near-stateless"`):

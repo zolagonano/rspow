@@ -80,7 +80,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             progress_watcher.abort();
 
             println!(
-                "Submitting bundle with {} proofs",
+                "\nSubmitting bundle with {} proofs",
                 submission.proof_bundle.len()
             );
             req_tx.send(Request::Submit(submission)).await?;
