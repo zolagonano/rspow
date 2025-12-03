@@ -11,9 +11,13 @@ license = "MIT OR Apache-2.0"
 readme = "README.md"
 edition = "2021"
 
+[features]
+default = ["equix"]
+equix = ["dep:equix"]
+
 [dependencies]
 argon2 = "0.5.3"
-equix = "0.5.0"
+equix = { version = "0.5.0", optional = true }
 flume = "0.11"
 hex = "0.4.3"
 rand = "0.8.5"
