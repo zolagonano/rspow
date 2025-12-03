@@ -304,8 +304,14 @@ fn join_handles(joins: Vec<thread::JoinHandle<()>>) {
 }
 
 fn solve_single(challenge: [u8; 32], bits: u32) -> Result<Option<[u8; 16]>, Error> {
-    let equix =
-        equix_crate::EquiX::new(&challenge).map_err(|err| Error::SolverFailed(err.to_string()))?;
+    // The EquiX API documents that a small fraction of challenge values will
+    // fail construction with program-constraint errors, and solvers are
+    // expected to skip those challenges rather than aborting the search.
+    // Treat any constructor error here as "no solution for this nonce".
+    let equix = match equix_crate::EquiX::new(&challenge) {
+        Ok(e) => e,
+        Err(_err) => return Ok(None),
+    };
     let solutions = equix.solve();
     for sol in solutions.iter() {
         let bytes = sol.to_bytes();
