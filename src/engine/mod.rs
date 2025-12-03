@@ -37,6 +37,18 @@ impl EquixEngine {
         }
         Ok(())
     }
+
+    /// Update the engine's configured target number of proofs.
+    ///
+    /// This controls both fresh `solve_bundle` calls and future `resume` calls
+    /// that rely on the engine configuration rather than an ad-hoc parameter.
+    pub fn set_required_proofs(&mut self, required_proofs: usize) -> Result<(), Error> {
+        if required_proofs == 0 {
+            return Err(Error::InvalidConfig("required_proofs must be >= 1".into()));
+        }
+        self.required_proofs = required_proofs;
+        Ok(())
+    }
 }
 
 impl EquixEngineBuilder {
@@ -94,11 +106,7 @@ impl PowEngine for EquixEngine {
         Ok(bundle)
     }
 
-    fn resume(
-        &mut self,
-        mut existing: Self::Bundle,
-        required_proofs: usize,
-    ) -> Result<Self::Bundle, Error> {
+    fn resume(&mut self, mut existing: Self::Bundle) -> Result<Self::Bundle, Error> {
         self.validate()?;
         if existing.config.bits != self.bits {
             return Err(Error::InvalidConfig(
@@ -108,12 +116,12 @@ impl PowEngine for EquixEngine {
         existing
             .verify_strict()
             .map_err(|e| Error::SolverFailed(e.to_string()))?;
+        let required_proofs = self.required_proofs;
         if required_proofs < existing.len() {
             return Err(Error::InvalidConfig(
                 "required_proofs must be >= existing proofs".into(),
             ));
         }
-        self.required_proofs = required_proofs;
         self.progress.store(existing.len() as u64, Ordering::SeqCst);
         if existing.len() >= required_proofs {
             return Ok(existing);
@@ -421,7 +429,7 @@ mod tests {
             .build()
             .expect("build engine");
 
-        let resumed = engine.resume(bundle, 2).expect("resume should succeed");
+        let resumed = engine.resume(bundle).expect("resume should succeed");
 
         assert_eq!(resumed.len(), 2);
         // All existing ids must still be present.
@@ -502,8 +510,12 @@ mod tests {
             .verify_strict()
             .expect("initial bundle should verify");
 
+        engine
+            .set_required_proofs(5)
+            .expect("update required_proofs for resume");
+
         let resumed = engine
-            .resume(initial.clone(), 5)
+            .resume(initial.clone())
             .expect("resume should extend bundle");
         assert_eq!(resumed.len(), 5);
         resumed
@@ -537,7 +549,7 @@ mod tests {
             .expect("build low bits engine");
 
         let err = engine_low
-            .resume(bundle, 2)
+            .resume(bundle)
             .expect_err("should reject bits mismatch");
         assert!(matches!(err, Error::InvalidConfig(_)));
     }

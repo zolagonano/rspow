@@ -63,10 +63,9 @@ pub trait PowEngine {
     /// Solve a new bundle for the given master challenge.
     fn solve_bundle(&mut self, master_challenge: [u8; 32]) -> Result<Self::Bundle, Error>;
 
-    /// Resume solving an existing bundle up to `required_proofs` total proofs.
-    fn resume(
-        &mut self,
-        existing: Self::Bundle,
-        required_proofs: usize,
-    ) -> Result<Self::Bundle, Error>;
+    /// Resume solving an existing bundle using the engine's configured target.
+    ///
+    /// The engine's own configuration (for example its `required_proofs` field)
+    /// determines how many proofs are required after resuming.
+    fn resume(&mut self, existing: Self::Bundle) -> Result<Self::Bundle, Error>;
 }
