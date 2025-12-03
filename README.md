@@ -43,7 +43,7 @@ Progress bars: read `progress.load(Ordering::Relaxed)` to track how many challen
 - **Verifier configuration** (`VerifierConfig`): `time_window >= 1s` and an *integral* number of seconds, `min_difficulty`, `min_required_proofs`; hot-swappable at runtime via `set_config` (internally lock-free reads with left-right).
 - **Submission**: `{ timestamp, client_nonce, ProofBundle }` from the client.
 
-Protocol sketch (details in `docs/near_stateless_pow.md`):
+Protocol sketch (details in the design doc [docs/near_stateless_pow.md](docs/near_stateless_pow.md), which covers the threat model, nonce derivation, time-window rules, and replay protection):
 
 1) Server computes `deterministic_nonce = F(secret, timestamp)` (keyed BLAKE3) for requested `timestamp` within `[now - time_window, now]`.
 2) Client samples a random `client_nonce`, derives `master_challenge = BLAKE3("rspow:challenge:v1" || deterministic_nonce || client_nonce)`, solves for a `ProofBundle`.
