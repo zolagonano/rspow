@@ -1,0 +1,23 @@
+- [x] Scaffold new EquiX-only crate structure per docs/equix_rewrite_plan.md (engine/core/types/verify/error/stream modules).
+- [x] Define PowEngine trait with solve_bundle/resume signatures using fixed [u8;32] challenge.
+- [x] Implement EquixEngineBuilder (derive_builder) and EquixEngine fields: bits, threads, required_proofs, progress (Arc<AtomicU64>), hasher (default BLAKE3).
+- [x] Implement deterministic challenge derivation (TagHasher) and EquiX solving pipeline: worker pool, flume channel, NonceSource, stop flag, dedup.
+- [x] Implement Proof/ProofBundle types with insert_proof (dedup), verify_strict (short-circuit), carrying master_challenge.
+- [x] Implement resume: continue from existing ProofBundle to higher required_proofs without duplicating prior proofs.
+- [x] Implement strict verification errors and minimal solve errors; wire progress increments and exact stop.
+- [x] Add tests: determinism, verify_strict dup/tamper, single vs multi-thread equivalence, resume N->N+M, required_proofs=1.
+- [x] Introduce generic Pow traits (PowConfig, PowProof, PowBundle, PowEngine) and adapt EquiX types to implement them.
+- [x] Add `equix` feature and gate the EquiX backend (dependency and modules) behind it (default-enabled).
+- [x] Move EquiX-specific types (`ProofConfig`, `Proof`, `ProofBundle`) and engine (`EquixEngine`, builder, solver pipeline) into a dedicated `equix` module.
+- [x] Trim `src/types.rs` to only hold algorithm-agnostic type aliases (e.g. `Solver`, `ProofResult`) without backend-specific structs or feature-gated types.
+- [x] Update `lib.rs` exports and tests to use the new `equix` module / aliases and verify builds with `equix` feature enabled (and disabled, if supported).
+- [x] Add optional `near-stateless` feature (default OFF) exposing helper toolkit.
+  - [x] Define `DeterministicNonceProvider` trait and default keyed-BLAKE3 implementation (no caching).
+  - [x] Define `ReplayCache` trait and provide an in-memory TTL implementation (using moka or lightweight map) for replay protection.
+  - [x] Provide `VerifierConfig` with runtime-update (async) support for `time_window`, `min_difficulty`, `min_required_proofs`.
+  - [x] Add client-side helpers to build `master_challenge`, run EquiX, and package `{ts, client_nonce, ProofBundle}` into a submission struct.
+  - [x] Add server-side helper to verify the submission struct end-to-end (time window, replay cache, deterministic nonce via provider, master challenge check, `verify_strict`).
+  - [x] Keep deterministic nonce un-cached by default; document that PRF is cheap and caching is optional via custom provider.
+  - [x] Ensure docs/examples reflect the helper APIs; no HTTP server included.
+  - [x] Add unit tests for near-stateless helpers (time window, replay, config updates, challenge matching).
+- [x] Near-stateless verifier boundary: accept timestamps exactly at `now - time_window` per docs; adjust condition and add regression test.
